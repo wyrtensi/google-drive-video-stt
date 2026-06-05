@@ -56,18 +56,39 @@ For development in this checkout, install the editable environment too:
 uv sync --extra dev
 ```
 
-Configuration lives in `data/config.yml`. The fastest way to create it is to fill
-in `.env` from the template and let the first run (or `gdstt config migrate`)
-auto-generate the YAML from it:
+Configuration lives in a single `config.yml`. For a fresh global install, generate
+one from the packaged defaults (the default `transcript -> keypoints` preset chain
+works out of the box):
+
+```bash
+gdstt config init      # writes the per-user config.yml + prompts/ next to it
+gdstt config path      # print the resolved config.yml path
+```
+
+`config init` (and `config link`/auto-migration) writes to an OS-specific per-user
+location unless you pass `--config`/`GDSTT_CONFIG` or set `DATA_DIR`:
+
+| OS | Default `config.yml` |
+| --- | --- |
+| Linux | `${XDG_CONFIG_HOME:-~/.config}/gdstt/config.yml` |
+| macOS | `~/Library/Application Support/gdstt/config.yml` |
+| Windows | `%APPDATA%\gdstt\config.yml` |
+
+The packaged prompt assets (`keypoints.md`, `transcript-cleanup.md`,
+`action-items.md`) are copied into `<config_dir>/prompts/` beside the config, and
+each preset's `prompt_file` points at them. There is no hidden runtime prompt in
+Python — the prompt text is owned by these `.md` files.
+
+Alternatively, migrate from an existing `.env`:
 
 ```bash
 cp .env.example .env
 # Set at least FOLDER_IDS, DEEPGRAM_API_KEY, and (if used) OUTPUT_DIR / OPENAI_API_KEY
-gdstt config migrate   # writes data/config.yml from .env; first run also does this
+gdstt config migrate   # writes config.yml from .env; first run also does this
 ```
 
 `.env` is only read during this one-time migration; afterwards every command reads
-`data/config.yml` exclusively. You can also author `data/config.yml` by hand (see
+`config.yml` exclusively. You can also author `config.yml` by hand (see
 [Configuration](#configuration)). Point at a non-default file with
 `gdstt --config PATH ...` or the `GDSTT_CONFIG` env var.
 
@@ -84,8 +105,21 @@ gdstt process <file-id> --dry-run
 ## Google Drive setup
 
 This app authenticates with a single Google OAuth user credential covering Drive.
-It reads OAuth client metadata from `data/credentials.json` and writes its own
-`data/token.json` when you run `gdstt auth`.
+
+Google auth is **config-owned and inline-first**. By default the OAuth client JSON
+lives inline in the config under `google.credentials` and the saved token under
+`google.token`, both inside `config.yml`. Import the downloaded client with
+`gdstt auth import-credentials <path>`, then run `gdstt auth` to write the token.
+
+File mode is an explicit opt-in: `gdstt auth use-files --credentials-file PATH
+[--token-file PATH]` sets `google.credentials_file`/`google.token_file` and clears
+the inline copies. When neither inline mappings nor file pointers are set, the
+loader falls back to `data/credentials.json` and `data/token.json` for
+back-compatibility (the legacy layout used by the examples below).
+
+Inline tokens, `client_secret`, and `refresh_token` are secrets: in a shared
+(synced) config, keep them in file mode (or a local, non-synced part of the
+config) rather than inline where others can read the config.
 
 ### Option A — gcloud / Application Default Credentials
 
@@ -213,20 +247,25 @@ openai:
   api_key: "..."
   model: gpt-5.4-mini    # global default model for presets
   batch: false           # global default batch mode for presets
+  batch_wait: true       # wait synchronously for batch results (default)
   max_parallel: 4        # cap on presets run concurrently
+google: {}               # inline-first auth; empty => data_dir fallback
 presets:
   transcript-cleanup:
-    instructions: "Clean up the raw transcript..."
+    prompt_file: prompts/transcript-cleanup.md   # packaged asset, copied beside the config
+    batch: false                                 # keep an upstream stage off batch (see below)
   keypoints:
     depends_on: [transcript-cleanup]   # overrides the built-in keypoints preset
   expertizeme-managers:
     depends_on: [transcript-cleanup]
-    instructions: "Extract per-manager action items..."
+    instructions: "Extract per-manager action items..."   # inline prompt instead of a file
 ```
 
 Presets define the OpenAI post-processing DAG (see
-[Preset DAG](#preset-dag-keypoints-and-beyond)). The env-var names below are still
-recognized by the one-time migration and map onto these YAML keys:
+[Preset DAG](#preset-dag-keypoints-and-beyond)). A preset's prompt comes from
+`instructions` (inline) **or** `prompt_file`; supplying neither is an error. The
+env-var names below are still recognized by the one-time migration and map onto
+these YAML keys:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -245,8 +284,9 @@ recognized by the one-time migration and map onto these YAML keys:
 | `OUTPUT_DIR` | — | Required when `OUTPUT_TARGET=folder`; local directory for transcript/keypoints files |
 | `OPENAI_KEYPOINTS` | `false` | Generate a `<base>.keypoints.md` Keypoints document via the OpenAI Responses API after transcription. Requires `OPENAI_API_KEY` |
 | `OPENAI_API_KEY` | — | Required when `OPENAI_KEYPOINTS=true` |
-| `OPENAI_MODEL` | `gpt-5.4-mini` | Model for the OpenAI keypoints pipeline |
-| `OPENAI_BATCH` | `false` | Submit keypoints generation via the OpenAI Batch API (~50% cheaper, higher latency) |
+| `OPENAI_MODEL` | `gpt-5.4-mini` | Global default model for presets |
+| `OPENAI_BATCH` | `false` | Global default batch mode. Batch API is ~50% cheaper but slower (not higher quality); batch on an upstream preset delays its downstream presets |
+| `OPENAI_BATCH_WAIT` | `true` | Wait synchronously for batch results (the async path is unsupported) |
 | `OPENAI_MAX_PARALLEL` | `4` | Max number of independent presets run concurrently (maps to `openai.max_parallel`) |
 | `DEEPGRAM_API_KEY` | — | Required when `STT_PROVIDER=deepgram` unless `DEEPGRAM_API_KEY_FILE` is set |
 | `DEEPGRAM_API_KEY_FILE` | — | Optional file containing a raw Deepgram token or JSON with `api_key`, `deepgram_api_key`, or `DEEPGRAM_API_KEY` |
@@ -355,12 +395,42 @@ back to the `openai` defaults.
 
 A built-in `keypoints` preset ships with the code and produces a `<base>.keypoints.md`
 document containing `## Задачи` (grouped by `### Ответственный`), `## Тезисы`, and
-`## Открытые вопросы` in plain text. Config presets override built-ins
-field-by-field, add new presets, and disable a built-in with `enabled: false`.
-Running any enabled preset requires `openai.api_key`, honors `proxy_url`, and uses
-the per-preset or global `openai.model`/`openai.batch` (the Batch API is ~50%
-cheaper at the price of higher latency). The canonical example chain is
+`## Открытые вопросы` in plain text. The default chain `transcript -> keypoints`
+works out of the box. Config presets override built-ins field-by-field, add new
+presets, and disable a built-in with `enabled: false`. Running any enabled preset
+requires `openai.api_key` and honors `proxy_url`. The canonical example chain is
 `transcript-cleanup -> keypoints + expertizeme-managers`.
+
+**Prompt source priority.** Each preset's instructions are resolved as
+`instructions` (inline text in the YAML) > `prompt_file` > error. A `prompt_file`
+is resolved in order: the path as written, then relative to the config file's
+directory, then the packaged asset by base name. A `prompt_file` that is missing,
+unreadable, or empty is an error, and a preset that defines neither `instructions`
+nor `prompt_file` is an error. The packaged prompt assets (`keypoints.md`,
+`transcript-cleanup.md`, `action-items.md`) are copied into `<config_dir>/prompts/`
+beside the config — there is no hidden runtime prompt in Python.
+
+**Adding a DAG stage (no Python changes).** Add an entry under `presets:` with an
+`instructions` or `prompt_file`, a `depends_on` chain, and optionally
+`model`/`batch`/`artifact_suffix`. To insert a stage in the middle, point the
+`depends_on` of the downstream presets at the new stage. Everything is config —
+editing `config.yml` is the only step.
+
+**Conflict rules (rejected at load time).** Duplicate YAML keys (including two
+presets sharing a name) are rejected; enabled presets must use unique
+`artifact_suffix` values so their sibling artifacts don't collide on disk; a
+`prompt_file` must resolve to a readable, non-empty file; and `depends_on` on an
+unknown/disabled preset or a cycle in the DAG is rejected.
+
+**Batch is cheaper and slower, not higher quality.** Setting `openai.batch: true`
+(globally or per preset) submits the pass through the OpenAI Batch API (~50%
+cheaper at the cost of higher latency); it does not change output quality. A
+recommended layout is global `openai.batch: true` with
+`transcript-cleanup.batch: false`, because batch on an upstream stage delays every
+downstream stage (they wait for its artifact). `openai.batch_wait: true` is the
+default (the service waits synchronously for batch results; the async path is not
+supported). Per-preset `model`/`batch`/`batch_wait` override the global
+`openai.*` defaults.
 
 Idempotency is per preset: `list_folder_state` reports an `artifact_ids` map keyed
 by `artifact_type`, so only the presets still missing an artifact are produced on a
@@ -402,7 +472,9 @@ Safe operator flow: `gdstt doctor` -> `gdstt list` -> `gdstt process <file-id> -
 that single-file path looks correct.
 
 ```bash
-gdstt auth [response_url]   # one-time interactive OAuth → data/token.json
+gdstt auth [response_url]   # one-time interactive OAuth → google.token (or token.json in file mode)
+gdstt auth import-credentials <path>   # store an OAuth client JSON inline (google.credentials)
+gdstt auth use-files --credentials-file PATH [--token-file PATH]   # switch to file mode
 gdstt doctor [--drive]      # check Drive/OAuth configuration without changing it
 gdstt latest [--folder ID] [--dry-run] [--max-size SIZE] [--confirm-large]   # process the newest mp4 in a folder
 gdstt run                   # continuous polling; can spend STT credits across all pending configured folders
@@ -412,7 +484,13 @@ gdstt speakers set <file-id> "Alice" "Bob"   # store explicit speaker names on a
 gdstt transcribe <audio> [-o out.txt]   # STT-only on a local file; prints to stdout by default
 gdstt relabel --in SRC --out OUT --map MAP.json [--no-header]   # deterministic local speaker relabeling
 gdstt list [--folder ID]   # show sibling mp3/txt state without doing work (alias: status)
-gdstt config migrate [--force]   # (re)write data/config.yml from the current .env/environment
+gdstt config init [--local] [--data-dir DIR] [--output-dir DIR] [--prompt-dir DIR] [--force]   # fresh config.yml + prompts/ from packaged defaults
+gdstt config migrate [--force]   # (re)write config.yml from the current .env/environment
+gdstt config path           # print the resolved config.yml path (no secrets required)
+gdstt config link DIR [--copy-prompts] [--force]   # move config into DIR and leave a pointer behind
+gdstt config get [KEY]      # print the masked config (or one dotted KEY value)
+gdstt config set KEY VALUE  # set a dotted KEY and validate
+gdstt config unset KEY      # remove an optional dotted KEY
 gdstt --config PATH <command>    # use a non-default config.yml (or set GDSTT_CONFIG)
 ```
 
@@ -442,6 +520,31 @@ limit are skipped unless you also pass `--confirm-large`.
 `run` has no preview mode and is intentionally the least safe operator entrypoint:
 it keeps polling and can continue spending STT credits until you stop it. Use it
 only after the single-file or `run-once --dry-run` path already matches expectations.
+
+#### Managing the config file
+
+There is always exactly one active `config.yml`; `gdstt config path` prints where
+it is. `config init` creates one from the packaged defaults and copies the prompt
+assets into `<config_dir>/prompts/`; `config get`/`set`/`unset` read (with secrets
+masked) or edit a dotted key (e.g. `openai.model`, `stt.deepgram.api_key`) in
+place, validating the result. The OS-default locations are listed in
+[Setup](#setup).
+
+`config link DIR` moves the effective full config into `DIR/config.yml` and leaves
+a forwarding pointer (`config_file: <DIR/config.yml>`) behind at the OS-default
+path; if no full config exists yet, it creates one there from the defaults. Pass
+`--copy-prompts` to copy the prompt assets into `DIR/prompts/`. This enables a
+**two-layer shared-folder setup**: keep the full `config.yml` + `prompts/` in a
+shared (synced) folder, while each machine's OS-default path holds only a pointer
+to it — the pointer path differs per OS, but every machine resolves the same shared
+config. `load_config()` follows the pointer chain to the real file. Keep secrets
+(`openai.api_key`, `stt.deepgram.api_key`, inline `google.token`/`credentials`) out
+of a shared config — use file mode or a local, non-synced copy.
+
+Synced notes folders are just ordinary user-chosen paths: to land artifacts in
+your (possibly synced) notes folder, set `output.target: folder` + `output.dir`,
+and select a non-default config or prompt directory with `gdstt --config PATH`,
+`GDSTT_CONFIG`, or `config init --prompt-dir`.
 
 ### Runtime reliability and summaries
 

@@ -2,7 +2,7 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.3.0
+version: 2.4.0
 last_updated: 2026-06-05
 ---
 
@@ -70,24 +70,33 @@ Deepgram (и, при включённых OpenAI-пресетах, OpenAI): `run
 
 ### `auth [--manual] [response_url]`
 
-Создать или обновить локальные OAuth-креденшелы. Обычный режим открывает
-браузерный flow на localhost. `--manual` печатает URL авторизации; переданный
-`response_url` завершает ручной обмен.
+Создать или обновить OAuth-токен. Обычный режим открывает браузерный flow на
+localhost. `--manual` печатает URL авторизации; `response_url` завершает ручной
+обмен. По умолчанию токен пишется inline в `google.token`; в файловом режиме - в
+`google.token_file`.
+
+Источник Google-аутентификации **по умолчанию inline-first**: OAuth client JSON в
+`google.credentials`, токен в `google.token`, оба внутри `config.yml`. Файловый
+режим (`google.credentials_file`/`google.token_file`) - явный opt-in; если ни
+inline, ни файл не заданы, загрузчик откатывается к `<data_dir>/credentials.json`
+и `<data_dir>/token.json` (legacy). Inline-токены и
+`client_secret`/`refresh_token` - **секреты**: в общем (shared) конфиге держи их в
+файловом режиме или локальной части, а не inline там, где конфиг видят другие.
 
 ### `auth-import-credentials <path>`
 
 Также доступно как `gdstt auth import-credentials <path>`. Прочитать скачанный
-OAuth client JSON и записать его inline в конфиг под `google.credentials`
-(секреты не печатаются). Сбрасывает любой указатель `google.credentials_file`,
-чтобы источник был один.
+OAuth client (Desktop app) JSON и записать inline под `google.credentials`
+(дефолтный inline-first путь, секреты не печатаются). Сбрасывает указатель
+`google.credentials_file`, чтобы источник был один.
 
 ### `auth-use-files --credentials-file PATH [--token-file PATH]`
 
-Также доступно как `gdstt auth use-files ...`. Переключить
-Google-аутентификацию в файловый режим: записать
-`google.credentials_file`/`google.token_file` и удалить inline
-`google.credentials`/`google.token`. По умолчанию `--token-file` —
-`<папка credentials>/token.json`.
+Также доступно как `gdstt auth use-files ...`. Переключить в файловый режим
+(opt-in): записать `google.credentials_file`/`google.token_file` и удалить inline
+`google.credentials`/`google.token`. `--token-file` по умолчанию -
+`<папка credentials>/token.json`. Используй, когда не хочешь держать секреты inline
+в общем конфиге.
 
 ### `latest [--folder ID] [--dry-run]`
 
@@ -137,17 +146,50 @@ Google-аутентификацию в файловый режим: записа
 ### `doctor [--drive]`
 
 Показать путь к активному `config.yml`, `DATA_DIR`, наличие credentials/token,
-число `FOLDER_IDS`, `STT_PROVIDER` и разрешённый DAG пресетов (имена,
-зависимости, enabled). С `--drive` дополнительно аутентифицируется и перечисляет
-настроенные папки.
+источник Google-auth (inline/файл/data_dir, без секретов), число `FOLDER_IDS`,
+`STT_PROVIDER` и разрешённый DAG пресетов (имена, зависимости, enabled). С
+`--drive` дополнительно аутентифицируется и перечисляет папки.
 
 ### `config migrate [--force]`
 
-Сгенерировать `data/config.yml` из текущего `.env`/окружения (с блоком
-`presets`). Конфиг авто-мигрируется при первом запуске, если файл отсутствует
-или пуст; эта команда - явная регенерация. `--force` перезаписывает
-существующий файл. Указать нестандартный файл: `gdstt --config PATH <command>`
-или переменная окружения `GDSTT_CONFIG`.
+Управление конфигом. Активный `config.yml` всегда один; путь печатает
+`gdstt config path`. OS-дефолт (если не заданы `--config`, `GDSTT_CONFIG` или
+явный `DATA_DIR`): Linux `${XDG_CONFIG_HOME:-~/.config}/gdstt/config.yml`, macOS
+`~/Library/Application Support/gdstt/config.yml`, Windows
+`%APPDATA%\gdstt\config.yml`. Рядом в `<config_dir>/prompts/` лежат скопированные
+prompt-ассеты (`keypoints.md`, `transcript-cleanup.md`, `action-items.md`), на
+которые ссылаются `prompt_file` пресетов; их кладут туда `config init`/`link` и
+авто-миграция. Нестандартный файл: `--config PATH` или `GDSTT_CONFIG`.
+
+Подкоманды `config`:
+
+- `config migrate [--force]` - сгенерировать активный `config.yml` из
+  `.env`/окружения (с `presets`). Авто-мигрируется при первом запуске, если файл
+  отсутствует/пуст; это явная регенерация.
+- `config init [--local] [--data-dir DIR] [--output-dir DIR] [--prompt-dir DIR]
+  [--force]` - свежий полный конфиг из дефолтов (цепочка `transcript -> keypoints`,
+  включён только `keypoints`) + копия промптов рядом. `--local` пишет
+  `./data/config.yml`; `--output-dir` ставит `output.target=folder`+`output.dir`;
+  `--prompt-dir` копирует промпты туда и направляет на них `prompt_file`.
+- `config path` - путь к активному конфигу без валидации секретов; при указателе
+  (`config_file:`) печатает обе точки (bootstrap и effective).
+- `config link DIR [--copy-prompts] [--force]` - перенести/создать полный конфиг
+  в `DIR/config.yml`, а на OS-дефолтном пути оставить указатель
+  `config_file: <DIR/config.yml>`. Нет полного конфига - создаёт из дефолтов.
+  `--copy-prompts` копирует промпты в `DIR/prompts/`.
+- `config get [KEY]` / `config set KEY VALUE` / `config unset KEY` - прочитать
+  (секреты замаскированы), записать+провалидировать или удалить точечный ключ.
+
+**Двухслойная shared-folder раскладка.** Общий синхронизируемый `config.yml` +
+`prompts/` кладут в общую папку, а на каждой машине OS-дефолтный путь несёт лишь
+указатель `config_file: <общий config.yml>` (путь на разных ОС разный) - делается
+через `gdstt config link <общая-папка> --copy-prompts`, загрузчик идёт по цепочке
+указателей до реального файла. Секреты (`openai.api_key`, `stt.deepgram.api_key`,
+inline `google.token`/`credentials`) в общем конфиге не храни. Папки заметок -
+обычные пути: артефакты в свою (в т.ч. синхронизируемую) папку шли через
+`output.dir`+`output.target=folder`, конфиг/промпты выбирай через `--config`,
+`GDSTT_CONFIG`, `config init --prompt-dir`; vault-wikilinks - опциональный слой
+агента (см. «Vault-интеграция»).
 
 ## Рабочий процесс Keypoints (агент)
 
@@ -238,15 +280,48 @@ Google-аутентификацию в файловый режим: записа
 - Без воды и маркетинга.
 - Пунктуацию и стиль **не перегенерируй** - правь sed-ом (см. шаг 6).
 
-Для автоматического пути без агента включи пресеты в `data/config.yml`: встроенный
+Для автоматического пути без агента включи пресеты в `config.yml`: встроенный
 пресет `keypoints` пишет `<base>.keypoints.md` через OpenAI Responses API. Пресеты
 образуют DAG (`depends_on`) - каждый пресет это один проход OpenAI со своими
-`instructions`, пишет свой соседний артефакт `<base><artifact_suffix>` (по
+инструкциями, пишет свой соседний артефакт `<base><artifact_suffix>` (по
 умолчанию `.<имя>.md`, метка `artifact_type=<имя>`); независимые пресеты идут
 параллельно. Конфиг-пресеты переопределяют встроенные по полям, добавляют новые и
-отключают встроенный через `enabled: false`. Канонический пример цепочки:
+отключают встроенный через `enabled: false`. Дефолтная цепочка
+`transcript -> keypoints` работает из коробки; канонический расширенный пример:
 `transcript-cleanup -> keypoints + expertizeme-managers`. Идемпотентность - по
 пресетам: повторный прогон делает только недостающие артефакты.
+
+**Откуда берётся промпт пресета (приоритет).** `instructions` (inline в YAML) >
+`prompt_file` (`.md`: как есть -> относительно папки конфига -> упакованный ассет
+по имени) > ошибка, если нет ни того, ни другого. Пустой/нечитаемый/отсутствующий
+`prompt_file` - тоже ошибка. Скрытого промпта в Python нет: дефолты живут в
+`.md`-ассетах (`prompts/keypoints.md` и т.д.) рядом с конфигом.
+
+**Как добавить новую стадию DAG (без правок Python).** Добавь запись в `presets:`:
+`instructions` или `prompt_file`, `depends_on` (цепочка), при нужде
+`model`/`batch`/`artifact_suffix`. Вставить в середину - перенаправь `depends_on`
+нижестоящих на новую стадию.
+
+```yaml
+presets:
+  transcript-cleanup: { prompt_file: prompts/transcript-cleanup.md }
+  keypoints: { depends_on: [transcript-cleanup] }   # переопределяет встроенный
+  action-items:
+    depends_on: [transcript-cleanup]
+    prompt_file: prompts/action-items.md
+```
+
+**Конфликты (валидация на загрузке).** Дубль-ключи в YAML (в т.ч. два пресета под
+одним именем) отвергаются; `artifact_suffix` включённых пресетов уникальны (иначе
+коллизия на диске); `prompt_file` - читаемый непустой файл; `depends_on` на
+неизвестный/отключённый пресет и циклы в DAG отвергаются.
+
+**Batch - дешевле и медленнее, не «качественнее».** `openai.batch: true` шлёт
+проход через Batch API (~на 50% дешевле ценой задержки), на качество не влияет.
+Рекомендация: глобально `openai.batch: true`, но `transcript-cleanup.batch: false`
+- batch на вышестоящей стадии задерживает все нижестоящие (ждут её артефакт). По
+умолчанию `openai.batch_wait: true` (синхронно ждём batch; асинхронного пути нет).
+Пер-пресетные `model`/`batch`/`batch_wait` переопределяют глобальные `openai.*`.
 
 ## Vault-интеграция (опционально)
 

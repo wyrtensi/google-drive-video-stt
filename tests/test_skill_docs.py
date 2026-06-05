@@ -172,6 +172,34 @@ def test_skill_documents_config_yml_and_preset_dag():
     assert "artifact_type" in text
 
 
+def test_skill_documents_config_owned_posture():
+    """The skill must teach prompt source priority, conflicts, batch, and the
+    config-management surface earlier stages added."""
+    text = SKILL_PATH.read_text(encoding="utf-8")
+
+    # Prompt source priority: instructions > prompt_file > error, packaged assets.
+    assert "instructions" in text
+    assert "prompt_file" in text
+    # The new config subcommands and the inline-first / file-mode auth split.
+    for needle in (
+        "config init",
+        "config path",
+        "config link",
+        "config get",
+        "config set",
+        "config unset",
+        "auth import-credentials",
+        "auth use-files",
+        "google.credentials",
+        "google.token_file",
+        "config_file",
+    ):
+        assert needle in text, f"skill must document {needle!r}"
+    # Batch is cheaper/slower, not higher quality; batch_wait default; per-stage.
+    assert "batch_wait" in text
+    assert "transcript-cleanup.batch" in text or "transcript-cleanup" in text
+
+
 def test_agents_doc_documents_config_yml_and_preset_dag():
     text = AGENTS_PATH.read_text(encoding="utf-8")
 
