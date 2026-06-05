@@ -863,3 +863,136 @@ def test_doctor_reports_no_presets_when_none_enabled(mocker, capsys, tmp_path, m
 
     out = capsys.readouterr().out
     assert "Presets: none enabled" in out
+
+
+def test_config_init_command_dispatch(mocker, capsys, tmp_path):
+    config_file = tmp_path / "config.yml"
+    init = mocker.patch("src.cli.init_config", return_value=config_file)
+
+    cli.main(["config", "init"])
+
+    init.assert_called_once_with(
+        local=False,
+        data_dir=None,
+        output_dir=None,
+        prompt_dir=None,
+        force=False,
+    )
+    out = capsys.readouterr().out
+    assert str(config_file) in out
+
+
+def test_config_init_command_passes_flags(mocker, tmp_path):
+    config_file = tmp_path / "config.yml"
+    init = mocker.patch("src.cli.init_config", return_value=config_file)
+
+    cli.main(
+        [
+            "config",
+            "init",
+            "--local",
+            "--data-dir",
+            "store",
+            "--output-dir",
+            "out",
+            "--prompt-dir",
+            "pr",
+            "--force",
+        ]
+    )
+
+    init.assert_called_once_with(
+        local=True,
+        data_dir="store",
+        output_dir="out",
+        prompt_dir="pr",
+        force=True,
+    )
+
+
+def test_config_init_command_reports_error(mocker):
+    mocker.patch("src.cli.init_config", side_effect=ValueError("already exists"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["config", "init"])
+
+    assert excinfo.value.code == 1
+
+
+def test_config_init_creates_real_config_without_secrets(monkeypatch, capsys, tmp_path):
+    config_file = tmp_path / "config.yml"
+    monkeypatch.setenv(cli.CONFIG_PATH_ENV_VAR, str(config_file))
+
+    cli.main(["config", "init"])
+
+    assert config_file.is_file()
+    assert (tmp_path / "prompts" / "keypoints.md").is_file()
+    out = capsys.readouterr().out
+    assert str(config_file) in out
+
+
+def test_config_path_prints_resolved_without_secrets(monkeypatch, capsys, tmp_path):
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
+        "folder_ids: [x]\nstt:\n  provider: deepgram\n", encoding="utf-8"
+    )
+    monkeypatch.setenv(cli.CONFIG_PATH_ENV_VAR, str(config_file))
+
+    cli.main(["config", "path"])
+
+    out = capsys.readouterr().out.strip()
+    assert out == str(config_file)
+
+
+def test_config_path_reports_pointer_both_ends(monkeypatch, capsys, tmp_path):
+    real = tmp_path / "real" / "config.yml"
+    real.parent.mkdir()
+    real.write_text("folder_ids: [x]\n", encoding="utf-8")
+    pointer = tmp_path / "pointer.yml"
+    pointer.write_text(f"config_file: {real}\n", encoding="utf-8")
+    monkeypatch.setenv(cli.CONFIG_PATH_ENV_VAR, str(pointer))
+
+    cli.main(["config", "path"])
+
+    out = capsys.readouterr().out
+    assert f"bootstrap: {pointer}" in out
+    assert f"effective: {real}" in out
+
+
+def test_config_link_command_dispatch(mocker, capsys, tmp_path):
+    dest = tmp_path / "linked" / "config.yml"
+    link = mocker.patch("src.cli.link_config", return_value=dest)
+
+    cli.main(["config", "link", str(tmp_path / "linked")])
+
+    link.assert_called_once_with(
+        str(tmp_path / "linked"),
+        copy_prompts=False,
+        force=False,
+    )
+    out = capsys.readouterr().out
+    assert str(dest) in out
+
+
+def test_config_link_command_passes_flags(mocker, tmp_path):
+    dest = tmp_path / "linked" / "config.yml"
+    link = mocker.patch("src.cli.link_config", return_value=dest)
+
+    cli.main(
+        ["config", "link", str(tmp_path / "linked"), "--copy-prompts", "--force"]
+    )
+
+    link.assert_called_once_with(
+        str(tmp_path / "linked"),
+        copy_prompts=True,
+        force=True,
+    )
+
+
+def test_config_link_command_reports_error(mocker, tmp_path):
+    mocker.patch("src.cli.link_config", side_effect=ValueError("already exists"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["config", "link", str(tmp_path / "linked")])
+
+    assert excinfo.value.code == 1

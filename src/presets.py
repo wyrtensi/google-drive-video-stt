@@ -24,6 +24,16 @@ from pathlib import Path
 _PACKAGED_PROMPTS_PACKAGE = "src.assets.prompts"
 _REPO_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "prompts"
 
+# Prompt assets shipped with the package. ``config init``/``config link`` and
+# auto-migration copy these beside a generated config so the default chain
+# (transcript -> keypoints) works out of the box and extra presets are one edit
+# away. Keep ``keypoints.md`` first: it is the only preset enabled by default.
+PACKAGED_PROMPT_ASSETS: tuple[str, ...] = (
+    "keypoints.md",
+    "transcript-cleanup.md",
+    "action-items.md",
+)
+
 
 def load_packaged_prompt(name: str) -> str:
     """Return the text of a packaged prompt asset by file name (e.g. ``keypoints.md``).

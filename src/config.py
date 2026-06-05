@@ -11,7 +11,9 @@ import yaml
 
 from src.presets import (
     BUILTIN_PRESETS,
+    PACKAGED_PROMPT_ASSETS,
     Preset,
+    default_artifact_suffix,
     load_packaged_prompt,
     merge_presets,
     validate_dag,
@@ -25,6 +27,10 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE_NAME = "config.yml"
+# Subdirectory (relative to a config file) where ``config init``/``link`` and
+# auto-migration copy the packaged prompt assets and where generated configs point
+# their ``prompt_file`` entries by default.
+PROMPTS_DIR_NAME = "prompts"
 CONFIG_PATH_ENV_VAR = "GDSTT_CONFIG"
 DATA_DIR_ENV_VAR = "DATA_DIR"
 APP_DIR_NAME = "gdstt"
@@ -816,6 +822,143 @@ def _relpath_for_config(path: Path | None, config_file: Path | None) -> str | No
     return os.path.relpath(path, config_file.parent)
 
 
+def _default_prompt_file(name: str) -> str:
+    """Return the default ``prompt_file`` for a preset (``prompts/<name>.md``).
+
+    Always uses ``/`` separators so generated YAML stays portable across OSes; the
+    loader resolves it relative to the config file's parent directory.
+    """
+    return f"{PROMPTS_DIR_NAME}/{name}.md"
+
+
+def _preset_to_yaml_entry(preset: Preset) -> dict:
+    """Serialize one resolved preset into a ``presets:`` entry.
+
+    The inline ``instructions`` carried by a resolved preset are deliberately not
+    written back; the prompt text is owned by the ``prompt_file`` (.md asset) so the
+    YAML stays a thin pointer. Non-default ``depends_on``/``model``/``batch``/
+    ``artifact_suffix`` are emitted only when they diverge from the built-in defaults.
+    """
+    entry: dict[str, object] = {"enabled": preset.enabled}
+    # The prompt text is owned by an .md asset copied beside the config under
+    # ``prompts/``. A bare basename (the built-in default, e.g. ``keypoints.md``) is
+    # rewritten to ``prompts/<name>.md`` so it points at the copied asset; an explicit
+    # path with directories is preserved as-is (already POSIX-normalized below).
+    prompt_file = preset.prompt_file or _default_prompt_file(preset.name)
+    if "/" not in prompt_file and "\\" not in prompt_file:
+        prompt_file = f"{PROMPTS_DIR_NAME}/{prompt_file}"
+    entry["prompt_file"] = prompt_file
+    if preset.depends_on:
+        entry["depends_on"] = list(preset.depends_on)
+    if preset.model is not None:
+        entry["model"] = preset.model
+    if preset.batch is not None:
+        entry["batch"] = preset.batch
+    if preset.artifact_suffix != default_artifact_suffix(preset.name):
+        entry["artifact_suffix"] = preset.artifact_suffix
+    return entry
+
+
+def _presets_to_yaml_dict(config: Config) -> dict:
+    """Build the ``presets:`` block for a serialized Config.
+
+    ``config.presets`` only holds enabled presets, so the built-in ``keypoints``
+    pass is emitted explicitly (with ``enabled: false`` but a real ``prompt_file``)
+    whenever it is disabled, keeping the default chain one edit away from re-enabled.
+    """
+    presets: dict[str, dict] = {}
+    for preset in config.presets:
+        presets[preset.name] = _preset_to_yaml_entry(preset)
+    for builtin in BUILTIN_PRESETS:
+        if builtin.name not in presets:
+            presets[builtin.name] = {
+                "enabled": False,
+                "prompt_file": _default_prompt_file(builtin.name),
+            }
+    return presets
+
+
+def _default_config_dict(
+    *,
+    data_dir: str | None = None,
+    output_target: str | None = None,
+    output_dir: str | None = None,
+    prompt_dir: str | None = None,
+) -> dict:
+    """Build a full default ``config.yml`` mapping for ``config init``/``link``.
+
+    The default preset chain is ``transcript -> keypoints`` with only ``keypoints``
+    enabled; every prompt_file uses ``/``-style relative paths so the generated YAML
+    is portable. ``prompt_dir`` (when given) is a ``/``-joined path the prompts were
+    copied to and that the prompt_file entries point at; otherwise the default
+    ``prompts/<name>.md`` layout is used. ``data_dir``/``output_*`` override the
+    matching fields.
+    """
+    def prompt_path(name: str) -> str:
+        if prompt_dir:
+            return f"{prompt_dir.rstrip('/')}/{name}.md"
+        return _default_prompt_file(name)
+
+    presets: dict[str, dict] = {}
+    for builtin in BUILTIN_PRESETS:
+        presets[builtin.name] = {
+            "enabled": builtin.name == "keypoints",
+            "prompt_file": prompt_path(builtin.name),
+        }
+
+    config: dict[str, object] = {
+        "folder_ids": [],
+        "poll_interval": 600,
+        "bitrate": "96k",
+        "data_dir": data_dir or "data",
+        "proxy_url": "",
+        "output": {
+            "target": (output_target or "drive"),
+            "dir": output_dir,
+        },
+        "stt": {
+            "provider": "deepgram",
+            "language": "ru",
+            "postprocess": True,
+            "deepgram": {
+                "api_key": "",
+                "model": "nova-3",
+                "diarize_model": "latest",
+                "audio_source": "m4a_copy",
+                "txt_formatter": "word_speaker",
+                "keyterms_enabled": True,
+                "keyterms_file": str(DEEPGRAM_DEFAULT_KEYTERMS_FILE),
+            },
+        },
+        "openai": {
+            "api_key": "",
+            "model": "gpt-5.4-mini",
+            "batch": False,
+            "max_parallel": 4,
+        },
+        "presets": presets,
+    }
+    return config
+
+
+def copy_prompt_assets(target_dir: Path, *, overwrite: bool = False) -> list[Path]:
+    """Copy the packaged prompt assets into ``target_dir``.
+
+    Each asset in :data:`PACKAGED_PROMPT_ASSETS` is written under ``target_dir`` by
+    file name. Existing files are left untouched unless ``overwrite`` is set. The
+    directory is created if needed. Returns the paths actually written.
+    """
+    target_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for name in PACKAGED_PROMPT_ASSETS:
+        dest = target_dir / name
+        if dest.exists() and not overwrite:
+            continue
+        dest.write_text(load_packaged_prompt(name), encoding="utf-8")
+        written.append(dest)
+    return written
+
+
 def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dict:
     """Serialize a Config into the grouped `config.yml` schema.
 
@@ -858,11 +1001,11 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "max_parallel": config.openai_max_parallel,
             "keypoints": config.openai_keypoints,
         },
-        # Seed a presets block from the built-in keypoints pass. The DAG executor
-        # (later tasks) reads this map; here it captures the current single-pass gate.
-        "presets": {
-            "keypoints": {"enabled": config.openai_keypoints},
-        },
+        # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
+        # the prompt text stays owned by the .md assets; disabled built-ins (e.g.
+        # keypoints under OPENAI_KEYPOINTS=false) are still written with their
+        # prompt_file so the default chain is one edit away from re-enabled.
+        "presets": _presets_to_yaml_dict(config),
     }
 
 
@@ -908,6 +1051,7 @@ def load_config(
         resolved.write_text(
             _dump_yaml(_config_to_yaml_dict(config, resolved)), encoding="utf-8"
         )
+        copy_prompt_assets(resolved.parent / PROMPTS_DIR_NAME)
         logger.info("Migrated configuration from environment to %s", resolved)
     except OSError as exc:
         logger.warning("Could not write migrated config file %s: %s", resolved, exc)
@@ -935,4 +1079,140 @@ def migrate_config(
     resolved.write_text(
         _dump_yaml(_config_to_yaml_dict(config, resolved)), encoding="utf-8"
     )
+    copy_prompt_assets(resolved.parent / PROMPTS_DIR_NAME)
     return resolved
+
+
+def _local_config_path() -> Path:
+    """Return ``./data/config.yml`` under the current working directory."""
+    return Path("data") / CONFIG_FILE_NAME
+
+
+def _rel_posix(path: Path, base: Path) -> str:
+    """Express ``path`` relative to ``base`` using ``/`` separators (portable YAML)."""
+    return Path(os.path.relpath(path, base)).as_posix()
+
+
+def init_config(
+    *,
+    config_path: str | Path | None = None,
+    local: bool = False,
+    data_dir: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    prompt_dir: str | Path | None = None,
+    force: bool = False,
+) -> Path:
+    """Create a fresh full ``config.yml`` from the packaged defaults.
+
+    Target selection: explicit ``config_path`` (or ``GDSTT_CONFIG``) wins; ``local``
+    writes ``./data/config.yml`` in the cwd; otherwise the cross-platform user config
+    path is used. The default preset chain is ``transcript -> keypoints`` with only
+    ``keypoints`` enabled. Prompt assets are always copied beside the config: into
+    ``prompt_dir`` when given (and the ``prompt_file`` entries point there), else into
+    ``<config_dir>/prompts/``. Refuses to overwrite a non-empty existing config unless
+    ``force``.
+    """
+    if config_path is not None:
+        target = Path(config_path)
+    elif local:
+        target = _local_config_path()
+    else:
+        env_path = os.environ.get(CONFIG_PATH_ENV_VAR, "").strip()
+        target = Path(env_path) if env_path else _user_config_path()
+
+    if target.exists() and _read_config_text(target).strip() and not force:
+        raise ValueError(
+            f"{target} already exists; pass --force to overwrite it."
+        )
+
+    config_dir = target.parent
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    if prompt_dir is not None:
+        prompts_target = Path(prompt_dir)
+        if not prompts_target.is_absolute():
+            prompts_target = config_dir / prompts_target
+        prompt_rel = _rel_posix(prompts_target, config_dir)
+    else:
+        prompts_target = config_dir / PROMPTS_DIR_NAME
+        prompt_rel = None
+
+    copy_prompt_assets(prompts_target)
+
+    data_dir_value = (
+        _rel_posix(Path(data_dir), config_dir) if data_dir is not None else None
+    )
+    output_target = None
+    output_dir_value = None
+    if output_dir is not None:
+        output_target = "folder"
+        output_dir_value = _rel_posix(Path(output_dir), config_dir)
+
+    data = _default_config_dict(
+        data_dir=data_dir_value,
+        output_target=output_target,
+        output_dir=output_dir_value,
+        prompt_dir=prompt_rel,
+    )
+    target.write_text(_dump_yaml(data), encoding="utf-8")
+    return target
+
+
+def link_config(
+    target_dir: str | Path,
+    *,
+    copy_prompts: bool = False,
+    force: bool = False,
+    config_path: str | Path | None = None,
+) -> Path:
+    """Move/create the effective full config into ``target_dir/config.yml``.
+
+    Resolves the current bootstrap and effective config. If a full config already
+    lives at the bootstrap path (the OS-default or ``--config``/``GDSTT_CONFIG``
+    target), its settings are moved into ``target_dir/config.yml`` and the bootstrap
+    is replaced with a forwarding pointer (``config_file: <target>``). If no full
+    config exists yet, a fresh one is created from the packaged defaults. Refuses to
+    overwrite an existing ``target_dir/config.yml`` unless ``force``. ``copy_prompts``
+    copies the packaged prompt assets into ``target_dir/prompts/`` when missing.
+    """
+    dest_dir = Path(target_dir)
+    dest = dest_dir / CONFIG_FILE_NAME
+
+    bootstrap, effective = resolve_effective_config_path(config_path)
+
+    if dest.exists() and _read_config_text(dest).strip() and not force:
+        raise ValueError(
+            f"{dest} already exists; pass --force to overwrite it."
+        )
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    effective_text = _read_config_text(effective) if effective.exists() else ""
+    if effective_text.strip():
+        # Move the existing full config's settings into the destination.
+        dest.write_text(effective_text, encoding="utf-8")
+        if effective.resolve() != dest.resolve():
+            # Replace the source with a pointer to the destination so the OS-default
+            # path keeps resolving to the moved config.
+            pointer_target = _rel_posix(dest, effective.parent)
+            effective.parent.mkdir(parents=True, exist_ok=True)
+            effective.write_text(
+                _dump_yaml({POINTER_KEY: pointer_target}), encoding="utf-8"
+            )
+    else:
+        # No full config yet: create one from defaults at the destination.
+        prompts_target = dest_dir / PROMPTS_DIR_NAME
+        copy_prompt_assets(prompts_target)
+        dest.write_text(_dump_yaml(_default_config_dict()), encoding="utf-8")
+        # Point the bootstrap path at the new destination unless it is the same file.
+        if bootstrap.resolve() != dest.resolve():
+            pointer_target = _rel_posix(dest, bootstrap.parent)
+            bootstrap.parent.mkdir(parents=True, exist_ok=True)
+            bootstrap.write_text(
+                _dump_yaml({POINTER_KEY: pointer_target}), encoding="utf-8"
+            )
+
+    if copy_prompts:
+        copy_prompt_assets(dest_dir / PROMPTS_DIR_NAME)
+
+    return dest

@@ -14,9 +14,12 @@ from src import main as main_module
 from src import relabel_transcript
 from src.config import (
     CONFIG_PATH_ENV_VAR,
+    init_config,
+    link_config,
     load_config,
     migrate_config,
     resolve_config_file_path,
+    resolve_effective_config_path,
 )
 from src.stt.transcribe import transcribe_file
 
@@ -252,6 +255,45 @@ def cmd_config_migrate(args: argparse.Namespace) -> None:
         logger.error("%s", exc)
         raise SystemExit(1) from exc
     print(f"Wrote configuration to {path}")
+
+
+def cmd_config_init(args: argparse.Namespace) -> None:
+    try:
+        path = init_config(
+            local=args.local,
+            data_dir=args.data_dir,
+            output_dir=args.output_dir,
+            prompt_dir=args.prompt_dir,
+            force=args.force,
+        )
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc
+    print(f"Wrote configuration to {path}")
+
+
+def cmd_config_path(args: argparse.Namespace) -> None:
+    # Resolve the path without building a validated Config so this never requires
+    # Drive/Deepgram/OpenAI secrets. When a pointer is active, report both ends.
+    bootstrap, effective = resolve_effective_config_path()
+    if bootstrap.resolve() != effective.resolve():
+        print(f"bootstrap: {bootstrap}")
+        print(f"effective: {effective}")
+    else:
+        print(str(effective))
+
+
+def cmd_config_link(args: argparse.Namespace) -> None:
+    try:
+        path = link_config(
+            args.dir,
+            copy_prompts=args.copy_prompts,
+            force=args.force,
+        )
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc
+    print(f"Linked configuration to {path}")
 
 
 def cmd_speakers_set(args: argparse.Namespace) -> None:
@@ -497,6 +539,63 @@ def build_parser() -> argparse.ArgumentParser:
         help="Overwrite an existing config.yml",
     )
     p_config_migrate.set_defaults(func=cmd_config_migrate)
+
+    p_config_init = config_sub.add_parser(
+        "init",
+        help="Create a fresh config.yml with default presets and prompt assets",
+    )
+    p_config_init.add_argument(
+        "--local",
+        action="store_true",
+        help="Write ./data/config.yml in the current directory instead of the user path",
+    )
+    p_config_init.add_argument(
+        "--data-dir",
+        default=None,
+        metavar="PATH",
+        help="Set data_dir in the generated config",
+    )
+    p_config_init.add_argument(
+        "--output-dir",
+        default=None,
+        metavar="PATH",
+        help="Write artifacts to this local folder (sets output.target=folder)",
+    )
+    p_config_init.add_argument(
+        "--prompt-dir",
+        default=None,
+        metavar="PATH",
+        help="Copy prompt assets here and point prompt_file entries at this directory",
+    )
+    p_config_init.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing config.yml",
+    )
+    p_config_init.set_defaults(func=cmd_config_init)
+
+    p_config_path = config_sub.add_parser(
+        "path",
+        help="Print the resolved config.yml path without requiring provider secrets",
+    )
+    p_config_path.set_defaults(func=cmd_config_path)
+
+    p_config_link = config_sub.add_parser(
+        "link",
+        help="Move the effective config to DIR/config.yml and leave a pointer behind",
+    )
+    p_config_link.add_argument("dir", help="Directory to hold the full config.yml")
+    p_config_link.add_argument(
+        "--copy-prompts",
+        action="store_true",
+        help="Copy prompt assets into DIR/prompts/ if missing",
+    )
+    p_config_link.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing DIR/config.yml",
+    )
+    p_config_link.set_defaults(func=cmd_config_link)
 
     p_speakers = sub.add_parser(
         "speakers",

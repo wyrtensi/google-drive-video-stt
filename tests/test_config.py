@@ -8,11 +8,15 @@ from src.config import (
     CONFIG_FILE_NAME,
     _config_to_yaml_dict,
     _user_config_path,
+    copy_prompt_assets,
+    init_config,
+    link_config,
     load_config,
     migrate_config,
     resolve_config_file_path,
     resolve_effective_config_path,
 )
+from src.presets import PACKAGED_PROMPT_ASSETS
 
 ENV_VARS = [
     "FOLDER_IDS",
@@ -1349,3 +1353,221 @@ def test_max_parallel_round_trips(monkeypatch, tmp_path):
     reloaded = load_config(config_path=config_file, validate_providers=False)
 
     assert reloaded.openai_max_parallel == 9
+
+
+# --- prompt assets & config generation --------------------------------------
+
+
+def test_copy_prompt_assets_copies_all_packaged_prompts(tmp_path):
+    target = tmp_path / "prompts"
+    written = copy_prompt_assets(target)
+
+    assert {p.name for p in written} == set(PACKAGED_PROMPT_ASSETS)
+    for name in PACKAGED_PROMPT_ASSETS:
+        assert (target / name).read_text(encoding="utf-8").strip()
+
+
+def test_copy_prompt_assets_skips_existing_without_overwrite(tmp_path):
+    target = tmp_path / "prompts"
+    target.mkdir()
+    (target / "keypoints.md").write_text("custom", encoding="utf-8")
+
+    written = copy_prompt_assets(target)
+
+    assert target / "keypoints.md" not in written
+    assert (target / "keypoints.md").read_text(encoding="utf-8") == "custom"
+
+
+def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
+    config_file = tmp_path / "config.yml"
+
+    path = init_config(config_path=config_file)
+
+    assert path == config_file
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["presets"]["keypoints"]["enabled"] is True
+    assert data["presets"]["keypoints"]["prompt_file"] == "prompts/keypoints.md"
+    # Only keypoints is enabled by default (the default transcript -> keypoints chain).
+    assert [name for name, p in data["presets"].items() if p["enabled"]] == ["keypoints"]
+    # The packaged prompt assets are copied beside the config so extra presets
+    # (transcript-cleanup, action-items) are one edit away.
+    assert (tmp_path / "prompts" / "keypoints.md").is_file()
+    assert (tmp_path / "prompts" / "transcript-cleanup.md").is_file()
+    # The generated config loads back without provider secrets and yields the chain.
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert {p.name for p in cfg.presets} == {"keypoints"}
+
+
+def test_init_local_writes_under_cwd_data(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
+    path = init_config(local=True)
+
+    assert path == Path("data") / CONFIG_FILE_NAME
+    assert (tmp_path / "data" / CONFIG_FILE_NAME).is_file()
+    assert (tmp_path / "data" / "prompts" / "keypoints.md").is_file()
+
+
+def test_init_uses_user_path_without_config(monkeypatch, tmp_path):
+    user = tmp_path / "user" / "config.yml"
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+
+    path = init_config()
+
+    assert path == user
+    assert user.is_file()
+
+
+def test_init_output_dir_sets_folder_target(tmp_path):
+    config_file = tmp_path / "config.yml"
+    out = tmp_path / "artifacts"
+
+    init_config(config_path=config_file, output_dir=out)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["output"]["target"] == "folder"
+    assert data["output"]["dir"] == "artifacts"
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.output_target == "folder"
+    assert cfg.output_dir == out
+
+
+def test_init_data_dir_writes_relative_path(tmp_path):
+    config_file = tmp_path / "config.yml"
+
+    init_config(config_path=config_file, data_dir=tmp_path / "store")
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["data_dir"] == "store"
+
+
+def test_init_prompt_dir_points_prompt_files(tmp_path):
+    config_file = tmp_path / "config.yml"
+    prompt_dir = tmp_path / "shared-prompts"
+
+    init_config(config_path=config_file, prompt_dir=prompt_dir)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["presets"]["keypoints"]["prompt_file"] == "shared-prompts/keypoints.md"
+    assert (prompt_dir / "keypoints.md").is_file()
+
+
+def test_init_refuses_existing_without_force(tmp_path):
+    config_file = tmp_path / "config.yml"
+    config_file.write_text("folder_ids: [keep]\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="already exists"):
+        init_config(config_path=config_file)
+
+    assert config_file.read_text(encoding="utf-8") == "folder_ids: [keep]\n"
+
+
+def test_init_force_overwrites(tmp_path):
+    config_file = tmp_path / "config.yml"
+    config_file.write_text("folder_ids: [stale]\n", encoding="utf-8")
+
+    init_config(config_path=config_file, force=True)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["folder_ids"] == []
+
+
+def test_link_moves_full_config_and_leaves_pointer(monkeypatch, tmp_path):
+    user = tmp_path / "user" / "config.yml"
+    user.parent.mkdir()
+    _write_yaml(user, {"folder_ids": ["moved"], "stt": {"provider": "disabled"}})
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+    monkeypatch.delenv("DATA_DIR", raising=False)
+
+    dest_dir = tmp_path / "linked"
+    dest = link_config(dest_dir)
+
+    assert dest == dest_dir / CONFIG_FILE_NAME
+    moved = yaml.safe_load(dest.read_text(encoding="utf-8"))
+    assert moved["folder_ids"] == ["moved"]
+    # The user path now forwards to the moved config.
+    pointer = yaml.safe_load(user.read_text(encoding="utf-8"))
+    assert "config_file" in pointer
+    _, effective = resolve_effective_config_path()
+    assert effective.resolve() == dest.resolve()
+
+
+def test_link_creates_default_when_no_config(monkeypatch, tmp_path):
+    user = tmp_path / "user" / "config.yml"
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+    monkeypatch.delenv("DATA_DIR", raising=False)
+
+    dest_dir = tmp_path / "linked"
+    dest = link_config(dest_dir)
+
+    data = yaml.safe_load(dest.read_text(encoding="utf-8"))
+    assert data["presets"]["keypoints"]["enabled"] is True
+    assert (dest_dir / "prompts" / "keypoints.md").is_file()
+    pointer = yaml.safe_load(user.read_text(encoding="utf-8"))
+    assert "config_file" in pointer
+
+
+def test_link_refuses_existing_dest_without_force(monkeypatch, tmp_path):
+    user = tmp_path / "user" / "config.yml"
+    user.parent.mkdir()
+    _write_yaml(user, {"folder_ids": ["x"], "stt": {"provider": "disabled"}})
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+    monkeypatch.delenv("DATA_DIR", raising=False)
+
+    dest_dir = tmp_path / "linked"
+    dest_dir.mkdir()
+    (dest_dir / CONFIG_FILE_NAME).write_text("folder_ids: [keep]\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="already exists"):
+        link_config(dest_dir)
+
+    assert (dest_dir / CONFIG_FILE_NAME).read_text(encoding="utf-8") == (
+        "folder_ids: [keep]\n"
+    )
+
+
+def test_link_copy_prompts_into_dest(monkeypatch, tmp_path):
+    user = tmp_path / "user" / "config.yml"
+    user.parent.mkdir()
+    _write_yaml(user, {"folder_ids": ["x"], "stt": {"provider": "disabled"}})
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+    monkeypatch.delenv("DATA_DIR", raising=False)
+
+    dest_dir = tmp_path / "linked"
+    link_config(dest_dir, copy_prompts=True)
+
+    assert (dest_dir / "prompts" / "keypoints.md").is_file()
+
+
+def test_migrate_writes_preset_prompt_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOLDER_IDS", "m1")
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    monkeypatch.setenv("OPENAI_KEYPOINTS", "false")
+    config_file = tmp_path / "config.yml"
+
+    migrate_config(config_path=config_file)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    # OPENAI_KEYPOINTS=false -> keypoints disabled but it STILL carries a prompt_file.
+    assert data["presets"]["keypoints"]["enabled"] is False
+    assert data["presets"]["keypoints"]["prompt_file"] == "prompts/keypoints.md"
+    assert (tmp_path / "prompts" / "keypoints.md").is_file()
+
+
+def test_migrate_keypoints_enabled_writes_prompt_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOLDER_IDS", "m1")
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-x")
+    config_file = tmp_path / "config.yml"
+
+    migrate_config(config_path=config_file)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["presets"]["keypoints"]["enabled"] is True
+    assert data["presets"]["keypoints"]["prompt_file"] == "prompts/keypoints.md"
