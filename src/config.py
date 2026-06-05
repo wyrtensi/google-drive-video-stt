@@ -891,8 +891,13 @@ def _relpath_for_config(path: Path | None, config_file: Path | None) -> str | No
     if path is None:
         return None
     if config_file is None:
-        return str(path)
-    return os.path.relpath(path, config_file.parent)
+        return Path(path).as_posix()
+    try:
+        return Path(os.path.relpath(path, config_file.parent)).as_posix()
+    except ValueError:
+        # Windows raises when path and base sit on different drives; fall back to the
+        # absolute path (still POSIX-normalized for portable YAML).
+        return Path(path).as_posix()
 
 
 def _default_prompt_file(name: str) -> str:
@@ -1125,6 +1130,23 @@ def _dump_yaml(data: dict) -> str:
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
+def _write_config_text(path: Path, text: str) -> None:
+    """Write the effective config and restrict it to owner-only (0600).
+
+    The config file is the primary store for inline secrets (``openai.api_key``,
+    ``stt.deepgram.api_key``, ``google.credentials.*.client_secret``,
+    ``google.token.*``), so it is created/rewritten with the same owner-only
+    permissions as ``token.json`` rather than the process umask, which on a shared
+    host would otherwise leave secrets group/world-readable. ``chmod`` is best-effort
+    (a no-op on platforms that do not support POSIX modes).
+    """
+    path.write_text(text, encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def _read_config_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8-sig")
@@ -1160,9 +1182,7 @@ def load_config(
     config = _config_from_env(validate_providers=validate_providers)
     try:
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(
-            _dump_yaml(_config_to_yaml_dict(config, resolved)), encoding="utf-8"
-        )
+        _write_config_text(resolved, _dump_yaml(_config_to_yaml_dict(config, resolved)))
         copy_prompt_assets(resolved.parent / PROMPTS_DIR_NAME)
         logger.info("Migrated configuration from environment to %s", resolved)
     except OSError as exc:
@@ -1188,9 +1208,7 @@ def migrate_config(
         )
     config = _config_from_env(validate_providers=False)
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    resolved.write_text(
-        _dump_yaml(_config_to_yaml_dict(config, resolved)), encoding="utf-8"
-    )
+    _write_config_text(resolved, _dump_yaml(_config_to_yaml_dict(config, resolved)))
     copy_prompt_assets(resolved.parent / PROMPTS_DIR_NAME)
     return resolved
 
@@ -1202,7 +1220,11 @@ def _local_config_path() -> Path:
 
 def _rel_posix(path: Path, base: Path) -> str:
     """Express ``path`` relative to ``base`` using ``/`` separators (portable YAML)."""
-    return Path(os.path.relpath(path, base)).as_posix()
+    try:
+        return Path(os.path.relpath(path, base)).as_posix()
+    except ValueError:
+        # Different Windows drives: no relative path exists, keep the absolute one.
+        return Path(path).as_posix()
 
 
 def init_config(
@@ -1266,7 +1288,7 @@ def init_config(
         output_dir=output_dir_value,
         prompt_dir=prompt_rel,
     )
-    target.write_text(_dump_yaml(data), encoding="utf-8")
+    _write_config_text(target, _dump_yaml(data))
     return target
 
 
@@ -1302,7 +1324,7 @@ def link_config(
     effective_text = _read_config_text(effective) if effective.exists() else ""
     if effective_text.strip():
         # Move the existing full config's settings into the destination.
-        dest.write_text(effective_text, encoding="utf-8")
+        _write_config_text(dest, effective_text)
         if effective.resolve() != dest.resolve():
             # Replace the source with a pointer to the destination so the OS-default
             # path keeps resolving to the moved config.
@@ -1315,7 +1337,7 @@ def link_config(
         # No full config yet: create one from defaults at the destination.
         prompts_target = dest_dir / PROMPTS_DIR_NAME
         copy_prompt_assets(prompts_target)
-        dest.write_text(_dump_yaml(_default_config_dict()), encoding="utf-8")
+        _write_config_text(dest, _dump_yaml(_default_config_dict()))
         # Point the bootstrap path at the new destination unless it is the same file.
         if bootstrap.resolve() != dest.resolve():
             pointer_target = _rel_posix(dest, bootstrap.parent)
@@ -1343,7 +1365,7 @@ MASKED_KEY_PATHS: tuple[tuple[str, ...], ...] = (
 # Leaf key names whose values are masked wherever they appear (covers nested
 # credentials/token blocks copied verbatim into the YAML).
 MASKED_LEAF_KEYS: frozenset[str] = frozenset(
-    {"client_secret", "refresh_token", "token", "access_token"}
+    {"client_secret", "refresh_token", "token", "access_token", "api_key"}
 )
 MASK = "***"
 
@@ -1439,21 +1461,43 @@ def _format_get_value(value: object) -> str:
     return str(value)
 
 
-def config_get(key: str | None = None, *, config_path: str | Path | None = None) -> str:
-    """Return a printable view of the effective config (whole, masked) or one value.
+def _mask_get_value(parts: list[str], value: object) -> object:
+    """Mask a single ``config get KEY`` value so secrets do not leak to stdout/logs.
 
-    With no ``key`` the entire effective config is dumped as YAML with secrets
-    masked. With a dotted ``key`` the single value is returned unmasked (the
-    operator explicitly asked for it).
+    A secret scalar leaf (api keys, tokens, client_secret, refresh_token) is replaced
+    wholesale; a mapping/list value (e.g. ``google.credentials`` / ``google.token``)
+    is deep-masked so nested secret leaves are hidden while structure stays visible.
+    """
+    if isinstance(value, (dict, list)):
+        return _mask_value(value)
+    if parts[-1] in MASKED_LEAF_KEYS and value not in (None, ""):
+        return MASK
+    return value
+
+
+def config_get(
+    key: str | None = None,
+    *,
+    config_path: str | Path | None = None,
+    show_secrets: bool = False,
+) -> str:
+    """Return a printable view of the effective config (whole) or one value.
+
+    Secrets (api keys, tokens, client_secret, refresh_token) are masked by default
+    for both the whole-config dump and a single-key lookup; pass ``show_secrets`` to
+    reveal them. This keeps ``config get google.credentials`` / ``google.token`` from
+    leaking the OAuth secret or refresh token to terminal scrollback or CI logs.
     """
     _, data = _load_effective_yaml_dict(config_path)
     if not key:
-        return _dump_yaml(_mask_config_dict(data)).rstrip("\n")
+        return _dump_yaml(data if show_secrets else _mask_config_dict(data)).rstrip("\n")
     parts = _split_key(key)
     try:
         value = _get_nested(data, parts)
     except KeyError as exc:
         raise ValueError(f"config key {key!r} is not set") from exc
+    if not show_secrets:
+        value = _mask_get_value(parts, value)
     return _format_get_value(value)
 
 
@@ -1498,12 +1542,12 @@ def _atomic_write_validated(
     existed = effective.exists()
     original = effective.read_text(encoding="utf-8-sig") if existed else None
     effective.parent.mkdir(parents=True, exist_ok=True)
-    effective.write_text(_dump_yaml(data), encoding="utf-8")
+    _write_config_text(effective, _dump_yaml(data))
     try:
         load_config(validate_providers=False, config_path=config_path)
     except Exception:
         if original is not None:
-            effective.write_text(original, encoding="utf-8")
+            _write_config_text(effective, original)
         else:
             effective.unlink(missing_ok=True)
         raise

@@ -119,7 +119,9 @@ def _run_one(
     batch_wait = (
         preset.batch_wait if preset.batch_wait is not None else config.openai_batch_wait
     )
-    if not batch_wait:
+    # batch_wait only governs batch submissions; a synchronous (non-batch) preset is
+    # already inline, so batch_wait=false is a no-op there and must not error.
+    if use_batch and not batch_wait:
         raise NotImplementedError(
             f"preset {preset.name!r}: batch_wait=false is not supported; the DAG "
             f"submits batch jobs and waits synchronously. Set batch_wait: true "

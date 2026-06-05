@@ -2,7 +2,7 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.4.0
+version: 2.4.1
 last_updated: 2026-06-05
 ---
 
@@ -98,7 +98,7 @@ OAuth client (Desktop app) JSON и записать inline под `google.creden
 `<папка credentials>/token.json`. Используй, когда не хочешь держать секреты inline
 в общем конфиге.
 
-### `latest [--folder ID] [--dry-run]`
+### `latest [--folder ID] [--dry-run] [--max-size SIZE] [--confirm-large]`
 
 Обработать самый свежий mp4 в папке (первой из `FOLDER_IDS`, если не задан
 `--folder`). Сначала `--dry-run`, чтобы подтвердить, какой файл будет обработан.
@@ -147,7 +147,7 @@ OAuth client (Desktop app) JSON и записать inline под `google.creden
 
 Показать путь к активному `config.yml`, `DATA_DIR`, наличие credentials/token,
 источник Google-auth (inline/файл/data_dir, без секретов), число `FOLDER_IDS`,
-`STT_PROVIDER` и разрешённый DAG пресетов (имена, зависимости, enabled). С
+`STT_PROVIDER` и разрешённый DAG пресетов (имена, зависимости, число включённых). С
 `--drive` дополнительно аутентифицируется и перечисляет папки.
 
 ### `config migrate [--force]`
@@ -177,8 +177,8 @@ prompt-ассеты (`keypoints.md`, `transcript-cleanup.md`, `action-items.md`)
   в `DIR/config.yml`, а на OS-дефолтном пути оставить указатель
   `config_file: <DIR/config.yml>`. Нет полного конфига - создаёт из дефолтов.
   `--copy-prompts` копирует промпты в `DIR/prompts/`.
-- `config get [KEY]` / `config set KEY VALUE` / `config unset KEY` - прочитать
-  (секреты замаскированы), записать+провалидировать или удалить точечный ключ.
+- `config get [KEY] [--show-secrets]` / `config set KEY VALUE` / `config unset KEY` -
+  прочитать (секреты замаскированы, `--show-secrets` их раскрывает), записать+провалидировать или удалить точечный ключ.
 
 **Двухслойная shared-folder раскладка.** Общий синхронизируемый `config.yml` +
 `prompts/` кладут в общую папку, а на каждой машине OS-дефолтный путь несёт лишь

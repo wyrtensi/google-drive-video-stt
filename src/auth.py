@@ -15,6 +15,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from src.config import Config, load_config
+from src.config import _write_config_text as _write_secret_config
 
 logger = logging.getLogger(__name__)
 
@@ -156,9 +157,10 @@ def _persist_inline_token(config: Config, token_json: str) -> None:
             google = {}
             data["google"] = google
         google["token"] = json.loads(token_json)
-        config_file.write_text(
-            yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
-            encoding="utf-8",
+        # Route through config's secure writer so the rewritten config (now holding a
+        # fresh inline refresh_token) is restricted to owner-only, not left at umask.
+        _write_secret_config(
+            config_file, yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
         )
     except (OSError, ValueError) as exc:
         logger.warning("Could not persist refreshed inline Google token: %s", exc)

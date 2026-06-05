@@ -1062,7 +1062,7 @@ def test_config_get_command_dispatch(mocker, capsys):
 
     cli.main(["config", "get"])
 
-    get.assert_called_once_with(None)
+    get.assert_called_once_with(None, show_secrets=False)
     assert "model: gpt" in capsys.readouterr().out
 
 
@@ -1071,8 +1071,17 @@ def test_config_get_command_passes_key(mocker, capsys):
 
     cli.main(["config", "get", "openai.model"])
 
-    get.assert_called_once_with("openai.model")
+    get.assert_called_once_with("openai.model", show_secrets=False)
     assert "gpt-5.4" in capsys.readouterr().out
+
+
+def test_config_get_command_show_secrets(mocker, capsys):
+    get = mocker.patch("src.cli.config_get", return_value="sk-secret")
+
+    cli.main(["config", "get", "openai.api_key", "--show-secrets"])
+
+    get.assert_called_once_with("openai.api_key", show_secrets=True)
+    assert "sk-secret" in capsys.readouterr().out
 
 
 def test_config_get_command_reports_error(mocker):

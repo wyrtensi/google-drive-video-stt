@@ -488,7 +488,7 @@ gdstt config init [--local] [--data-dir DIR] [--output-dir DIR] [--prompt-dir DI
 gdstt config migrate [--force]   # (re)write config.yml from the current .env/environment
 gdstt config path           # print the resolved config.yml path (no secrets required)
 gdstt config link DIR [--copy-prompts] [--force]   # move config into DIR and leave a pointer behind
-gdstt config get [KEY]      # print the masked config (or one dotted KEY value)
+gdstt config get [KEY] [--show-secrets]   # print the config/KEY with secrets masked (or revealed)
 gdstt config set KEY VALUE  # set a dotted KEY and validate
 gdstt config unset KEY      # remove an optional dotted KEY
 gdstt --config PATH <command>    # use a non-default config.yml (or set GDSTT_CONFIG)

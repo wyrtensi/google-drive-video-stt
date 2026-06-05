@@ -1766,11 +1766,29 @@ def test_config_get_whole_masks_secrets(tmp_path):
     assert "***" in output
 
 
-def test_config_get_single_value_is_unmasked(tmp_path):
+def test_config_get_single_secret_is_masked_by_default(tmp_path):
     config_file = _base_config_file(tmp_path)
     config_set("openai.api_key", "sk-secret", config_path=config_file)
 
-    assert config_get("openai.api_key", config_path=config_file) == "sk-secret"
+    # A single-key get of a secret leaf must not leak the value to stdout/logs.
+    assert config_get("openai.api_key", config_path=config_file) == "***"
+
+
+def test_config_get_single_secret_revealed_with_show_secrets(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set("openai.api_key", "sk-secret", config_path=config_file)
+
+    assert (
+        config_get("openai.api_key", config_path=config_file, show_secrets=True)
+        == "sk-secret"
+    )
+
+
+def test_config_get_single_nonsecret_is_plain(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set("openai.model", "gpt-x", config_path=config_file)
+
+    assert config_get("openai.model", config_path=config_file) == "gpt-x"
 
 
 def test_config_get_missing_key_raises(tmp_path):

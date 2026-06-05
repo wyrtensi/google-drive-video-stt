@@ -272,10 +272,18 @@ def _describe_google_token(config) -> str:
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
-    config = load_config(validate_providers=False)
+    config_path = resolve_config_file_path()
+    try:
+        config = load_config(validate_providers=False)
+    except ValueError as exc:
+        # doctor is the command an operator runs to diagnose a broken config, so a
+        # config error (e.g. an unresolvable preset prompt_file) must be reported as
+        # a diagnostic line rather than crashing with a traceback.
+        print(f"config: {config_path} ({'OK' if config_path.exists() else 'missing'})")
+        print(f"config error: {exc}")
+        raise SystemExit(1) from exc
     credentials_path = config.data_dir / "credentials.json"
     token_path = config.data_dir / "token.json"
-    config_path = resolve_config_file_path()
 
     print(f"config: {config_path} ({'OK' if config_path.exists() else 'missing'})")
     print(f"DATA_DIR: {config.data_dir}")
@@ -350,7 +358,7 @@ def cmd_config_link(args: argparse.Namespace) -> None:
 
 def cmd_config_get(args: argparse.Namespace) -> None:
     try:
-        output = config_get(args.key)
+        output = config_get(args.key, show_secrets=args.show_secrets)
     except ValueError as exc:
         logger.error("%s", exc)
         raise SystemExit(1) from exc
@@ -713,6 +721,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="KEY",
         help="Dotted key (e.g. openai.model); omit to print the whole masked config",
+    )
+    p_config_get.add_argument(
+        "--show-secrets",
+        action="store_true",
+        help="Reveal secret values (api keys, tokens) instead of masking them",
     )
     p_config_get.set_defaults(func=cmd_config_get)
 
