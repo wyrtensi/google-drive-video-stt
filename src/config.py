@@ -68,6 +68,7 @@ class Config:
     openai_keypoints: bool = False
     openai_model: str = "gpt-5.4-mini"
     openai_batch: bool = False
+    openai_batch_wait: bool = True
     openai_max_parallel: int = 4
     deepgram_model: str = "nova-3"
     deepgram_diarize_model: str = "latest"
@@ -424,6 +425,9 @@ def _config_from_env(*, validate_providers: bool = True) -> Config:
         os.environ.get("OPENAI_KEYPOINTS", ""), default=False
     )
     openai_batch = _parse_bool(os.environ.get("OPENAI_BATCH", ""), default=False)
+    openai_batch_wait = _parse_bool(
+        os.environ.get("OPENAI_BATCH_WAIT", ""), default=True
+    )
     openai_max_parallel = _parse_max_parallel(
         os.environ.get("OPENAI_MAX_PARALLEL", ""), default=4
     )
@@ -496,6 +500,7 @@ def _config_from_env(*, validate_providers: bool = True) -> Config:
         openai_keypoints=openai_keypoints,
         openai_model=openai_model,
         openai_batch=openai_batch,
+        openai_batch_wait=openai_batch_wait,
         openai_max_parallel=openai_max_parallel,
         deepgram_model=deepgram_model,
         deepgram_diarize_model=deepgram_diarize_model,
@@ -761,6 +766,7 @@ def _config_from_yaml(
     openai_model = _yaml_str(openai.get("model"), "gpt-5.4-mini") or "gpt-5.4-mini"
     openai_keypoints = _yaml_bool(openai.get("keypoints"), default=False)
     openai_batch = _yaml_bool(openai.get("batch"), default=False)
+    openai_batch_wait = _yaml_bool(openai.get("batch_wait"), default=True)
     openai_max_parallel = _parse_max_parallel(openai.get("max_parallel"), default=4)
     presets = _resolve_presets(config_presets, config_file)
 
@@ -855,6 +861,7 @@ def _config_from_yaml(
         openai_keypoints=openai_keypoints,
         openai_model=openai_model,
         openai_batch=openai_batch,
+        openai_batch_wait=openai_batch_wait,
         openai_max_parallel=openai_max_parallel,
         deepgram_model=deepgram_model,
         deepgram_diarize_model=deepgram_diarize_model,
@@ -920,6 +927,10 @@ def _preset_to_yaml_entry(preset: Preset) -> dict:
         entry["model"] = preset.model
     if preset.batch is not None:
         entry["batch"] = preset.batch
+    # batch_wait is omitted unless explicitly set so the generated YAML stays a thin
+    # pointer that inherits the global openai.batch_wait default.
+    if preset.batch_wait is not None:
+        entry["batch_wait"] = preset.batch_wait
     if preset.artifact_suffix != default_artifact_suffix(preset.name):
         entry["artifact_suffix"] = preset.artifact_suffix
     return entry
@@ -1091,6 +1102,13 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "api_key": config.openai_api_key,
             "model": config.openai_model,
             "batch": config.openai_batch,
+            # batch_wait defaults to true and is omitted unless explicitly disabled,
+            # keeping the generated YAML free of the (unsupported) async path.
+            **(
+                {}
+                if config.openai_batch_wait
+                else {"batch_wait": config.openai_batch_wait}
+            ),
             "max_parallel": config.openai_max_parallel,
             "keypoints": config.openai_keypoints,
         },
@@ -1456,7 +1474,7 @@ def _parse_set_value(parts: list[str], raw: str) -> object:
         items = [item for item in re.split(r"[,\s]+", text) if item]
         return items
     # Booleans for known boolean leaves.
-    if leaf in {"enabled", "batch", "drive", "postprocess", "keyterms_enabled"}:
+    if leaf in {"enabled", "batch", "batch_wait", "drive", "postprocess", "keyterms_enabled"}:
         return _parse_bool(raw, default=False)
     # Integers for known numeric leaves.
     if leaf in {"poll_interval", "max_parallel"}:

@@ -111,11 +111,26 @@ def _run_one(
     else:
         input_text = build_prompt(transcript, file_name, speaker_names=speaker_names)
 
+    use_batch = preset.batch if preset.batch is not None else config.openai_batch
+    # batch_wait resolution: per-preset override wins, else the global default
+    # (openai.batch_wait, itself defaulting to true). Only the synchronous
+    # submit-and-wait path is implemented; an async pending-job state (batch_wait
+    # false) is intentionally unsupported.
+    batch_wait = (
+        preset.batch_wait if preset.batch_wait is not None else config.openai_batch_wait
+    )
+    if not batch_wait:
+        raise NotImplementedError(
+            f"preset {preset.name!r}: batch_wait=false is not supported; the DAG "
+            f"submits batch jobs and waits synchronously. Set batch_wait: true "
+            f"(or leave it unset to inherit the default)."
+        )
+
     pipeline = OpenAIPipeline(
         api_key=config.openai_api_key,
         model=preset.model or config.openai_model,
         proxy_url=config.proxy_url,
-        use_batch=preset.batch if preset.batch is not None else config.openai_batch,
+        use_batch=use_batch,
     )
     try:
         text, usage = pipeline.run(preset.instructions, input_text)

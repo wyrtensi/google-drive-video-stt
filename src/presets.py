@@ -87,6 +87,9 @@ class Preset:
     depends_on: tuple[str, ...] = ()
     model: str | None = None
     batch: bool | None = None
+    # ``None`` inherits the global ``openai.batch_wait`` default at execution time;
+    # an explicit bool overrides it per preset.
+    batch_wait: bool | None = None
     artifact_suffix: str = ""
     enabled: bool = True
     prompt_file: str | None = None
@@ -172,6 +175,7 @@ def _build_preset(name: str, raw: Mapping, base: Preset | None) -> Preset:
             depends_on=_depends_on(raw.get("depends_on")),
             model=_opt_str(raw.get("model")),
             batch=_opt_bool(raw.get("batch")),
+            batch_wait=_opt_bool(raw.get("batch_wait")),
             artifact_suffix=suffix or default_artifact_suffix(name),
             enabled=_bool(raw.get("enabled"), default=True),
             prompt_file=prompt_file,
@@ -188,6 +192,8 @@ def _build_preset(name: str, raw: Mapping, base: Preset | None) -> Preset:
         overrides["model"] = _opt_str(raw.get("model"))
     if "batch" in raw:
         overrides["batch"] = _opt_bool(raw.get("batch"))
+    if "batch_wait" in raw:
+        overrides["batch_wait"] = _opt_bool(raw.get("batch_wait"))
     if "artifact_suffix" in raw:
         suffix = _as_str(raw.get("artifact_suffix")).strip()
         overrides["artifact_suffix"] = suffix or default_artifact_suffix(name)

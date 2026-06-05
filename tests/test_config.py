@@ -592,6 +592,65 @@ def test_loads_grouped_yaml(tmp_path):
     assert cfg.openai_batch is True
 
 
+def test_openai_batch_wait_defaults_true(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "openai": {"api_key": "sk", "model": "gpt-5.4"},
+            "presets": {"keypoints": {"enabled": False}},
+        },
+    )
+    cfg = load_config(config_path=config_file)
+    assert cfg.openai_batch_wait is True
+
+
+def test_openai_batch_wait_parsed_from_yaml(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "openai": {"api_key": "sk", "batch_wait": False},
+            "presets": {"keypoints": {"enabled": False}},
+        },
+    )
+    cfg = load_config(config_path=config_file)
+    assert cfg.openai_batch_wait is False
+
+
+def test_generated_yaml_omits_batch_wait_by_default(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "openai": {"api_key": "sk"},
+            "presets": {"keypoints": {"enabled": False}},
+        },
+    )
+    cfg = load_config(config_path=config_file)
+    serialized = _config_to_yaml_dict(cfg, config_file)
+    # batch_wait defaults to true; the serialized YAML omits it (no hidden setting).
+    assert "batch_wait" not in serialized["openai"]
+
+
+def test_generated_yaml_emits_batch_wait_when_disabled(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "openai": {"api_key": "sk", "batch_wait": False},
+            "presets": {"keypoints": {"enabled": False}},
+        },
+    )
+    cfg = load_config(config_path=config_file)
+    serialized = _config_to_yaml_dict(cfg, config_file)
+    assert serialized["openai"]["batch_wait"] is False
+
+
 def test_yaml_disabled_provider_is_mp3_only(tmp_path):
     config_file = tmp_path / "config.yml"
     # Disabling the built-in keypoints preset keeps this a pure mp3-only setup; with

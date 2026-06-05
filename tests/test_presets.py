@@ -163,6 +163,24 @@ def test_merge_batch_and_model_fallback_none():
     merged = merge_presets(BUILTIN_PRESETS, {"extra": {"instructions": "x"}})
     assert merged["extra"].model is None
     assert merged["extra"].batch is None
+    assert merged["extra"].batch_wait is None
+
+
+def test_merge_parses_batch_wait():
+    merged = merge_presets(
+        BUILTIN_PRESETS,
+        {
+            "wait": {"instructions": "x", "batch_wait": True},
+            "nowait": {"instructions": "y", "batch_wait": False},
+        },
+    )
+    assert merged["wait"].batch_wait is True
+    assert merged["nowait"].batch_wait is False
+
+
+def test_merge_overrides_builtin_batch_wait():
+    merged = merge_presets(BUILTIN_PRESETS, {"keypoints": {"batch_wait": False}})
+    assert merged["keypoints"].batch_wait is False
 
 
 def test_merge_rejects_non_mapping_entry():
