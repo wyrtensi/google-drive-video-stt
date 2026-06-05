@@ -7,9 +7,11 @@ from dotenv import load_dotenv as real_load_dotenv
 from src.config import (
     CONFIG_FILE_NAME,
     _config_to_yaml_dict,
+    _user_config_path,
     load_config,
     migrate_config,
     resolve_config_file_path,
+    resolve_effective_config_path,
 )
 
 ENV_VARS = [
@@ -718,6 +720,188 @@ def test_existing_yaml_takes_precedence_over_env(monkeypatch, tmp_path):
     cfg = load_config(config_path=config_file, validate_providers=False)
 
     assert cfg.folder_ids == ["from-yaml"]
+
+
+# --- user config path -------------------------------------------------------
+
+
+def test_user_config_path_windows(monkeypatch):
+    monkeypatch.setattr("src.config.sys.platform", "win32")
+    monkeypatch.setenv("APPDATA", "/win/appdata")
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    assert _user_config_path() == Path("/win/appdata/gdstt/config.yml")
+
+
+def test_user_config_path_windows_without_appdata(monkeypatch):
+    monkeypatch.setattr("src.config.sys.platform", "win32")
+    monkeypatch.delenv("APPDATA", raising=False)
+
+    expected = (Path("~/AppData/Roaming") / "gdstt" / "config.yml").expanduser()
+    assert _user_config_path() == expected
+
+
+def test_user_config_path_macos(monkeypatch):
+    monkeypatch.setattr("src.config.sys.platform", "darwin")
+
+    expected = (
+        Path("~/Library/Application Support") / "gdstt" / "config.yml"
+    ).expanduser()
+    assert _user_config_path() == expected
+
+
+def test_user_config_path_linux_uses_xdg(monkeypatch):
+    monkeypatch.setattr("src.config.sys.platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/custom/xdg")
+
+    assert _user_config_path() == Path("/custom/xdg/gdstt/config.yml")
+
+
+def test_user_config_path_linux_defaults_to_dot_config(monkeypatch):
+    monkeypatch.setattr("src.config.sys.platform", "linux")
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    expected = (Path("~/.config") / "gdstt" / "config.yml").expanduser()
+    assert _user_config_path() == expected
+
+
+# --- resolver priority ------------------------------------------------------
+
+
+def test_resolve_priority_full_ordering(monkeypatch, tmp_path):
+    arg = tmp_path / "arg.yml"
+    env = tmp_path / "env.yml"
+    data = tmp_path / "datadir"
+    user = tmp_path / "user.yml"
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    monkeypatch.setenv("GDSTT_CONFIG", str(env))
+    monkeypatch.setenv("DATA_DIR", str(data))
+
+    # --config arg beats everything.
+    assert resolve_config_file_path(arg) == arg
+
+    # Without an arg, GDSTT_CONFIG wins over DATA_DIR and the user path.
+    assert resolve_config_file_path() == env
+
+    # Without GDSTT_CONFIG, DATA_DIR/config.yml is used.
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+    assert resolve_config_file_path() == data / CONFIG_FILE_NAME
+
+    # With neither set, fall back to the per-user path (no cwd ./data default).
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    assert resolve_config_file_path() == user
+
+
+def test_resolve_data_dir_only_honored_when_set(monkeypatch, tmp_path):
+    user = tmp_path / "user.yml"
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+    monkeypatch.delenv("DATA_DIR", raising=False)
+
+    # No DATA_DIR -> user path, NOT ./data/config.yml.
+    assert resolve_config_file_path() == user
+
+    # Empty DATA_DIR is treated as unset.
+    monkeypatch.setenv("DATA_DIR", "  ")
+    assert resolve_config_file_path() == user
+
+    # Explicit DATA_DIR -> its config.yml.
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "dd"))
+    assert resolve_config_file_path() == tmp_path / "dd" / CONFIG_FILE_NAME
+
+
+def test_resolve_identical_from_different_cwd(monkeypatch, tmp_path):
+    user = tmp_path / "user.yml"
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+    monkeypatch.delenv("DATA_DIR", raising=False)
+
+    here = tmp_path / "here"
+    there = tmp_path / "there"
+    here.mkdir()
+    there.mkdir()
+
+    monkeypatch.chdir(here)
+    first = resolve_config_file_path()
+    monkeypatch.chdir(there)
+    second = resolve_config_file_path()
+
+    assert first == second == user
+
+
+# --- pointer configs --------------------------------------------------------
+
+
+def test_pointer_resolves_relative_target(monkeypatch, tmp_path):
+    pointer = tmp_path / "pointer.yml"
+    target = tmp_path / "real" / "config.yml"
+    target.parent.mkdir()
+    _write_yaml(target, {"folder_ids": ["pointed"], "stt": {"provider": "disabled"}})
+    pointer.write_text("config_file: real/config.yml\n", encoding="utf-8")
+
+    bootstrap, effective = resolve_effective_config_path(pointer)
+    assert bootstrap == pointer
+    assert effective == target
+
+    cfg = load_config(config_path=pointer, validate_providers=False)
+    assert cfg.folder_ids == ["pointed"]
+
+
+def test_pointer_resolves_absolute_target(monkeypatch, tmp_path):
+    pointer = tmp_path / "pointer.yml"
+    target = tmp_path / "abs.yml"
+    _write_yaml(target, {"folder_ids": ["abs"], "stt": {"provider": "disabled"}})
+    pointer.write_text(f"config_file: {target}\n", encoding="utf-8")
+
+    _, effective = resolve_effective_config_path(pointer)
+    assert effective == target
+
+
+def test_pointer_expands_user_and_env_vars(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    target = home / "gdstt.yml"
+    target.parent.mkdir()
+    _write_yaml(target, {"folder_ids": ["expanded"], "stt": {"provider": "disabled"}})
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("MY_CFG_DIR", str(home))
+
+    pointer = tmp_path / "pointer.yml"
+    pointer.write_text("config_file: $MY_CFG_DIR/gdstt.yml\n", encoding="utf-8")
+    _, effective = resolve_effective_config_path(pointer)
+    assert effective == target
+
+    pointer.write_text("config_file: ~/gdstt.yml\n", encoding="utf-8")
+    _, effective = resolve_effective_config_path(pointer)
+    assert effective == target
+
+
+def test_pointer_with_extra_keys_rejected(tmp_path):
+    pointer = tmp_path / "pointer.yml"
+    pointer.write_text(
+        "config_file: real.yml\nfolder_ids: [oops]\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="extra keys"):
+        resolve_effective_config_path(pointer)
+
+
+def test_pointer_self_reference_rejected(tmp_path):
+    pointer = tmp_path / "pointer.yml"
+    pointer.write_text("config_file: pointer.yml\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="loop"):
+        resolve_effective_config_path(pointer)
+
+
+def test_pointer_loop_rejected(tmp_path):
+    a = tmp_path / "a.yml"
+    b = tmp_path / "b.yml"
+    a.write_text("config_file: b.yml\n", encoding="utf-8")
+    b.write_text("config_file: a.yml\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="loop"):
+        resolve_effective_config_path(a)
 
 
 def test_resolve_config_file_path_prefers_explicit_arg(monkeypatch, tmp_path):

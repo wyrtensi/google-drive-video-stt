@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -23,6 +26,12 @@ logger = logging.getLogger(__name__)
 
 CONFIG_FILE_NAME = "config.yml"
 CONFIG_PATH_ENV_VAR = "GDSTT_CONFIG"
+DATA_DIR_ENV_VAR = "DATA_DIR"
+APP_DIR_NAME = "gdstt"
+# Keys a forwarding pointer file may carry alongside ``config_file``. A pointer is
+# meant to do one thing — redirect to the real config — so any runtime key (e.g.
+# ``folder_ids`` or ``stt``) appearing next to ``config_file`` is rejected.
+POINTER_KEY = "config_file"
 
 SUPPORTED_STT_PROVIDERS = ("", "deepgram")
 OUTPUT_TARGETS = ("drive", "folder")
@@ -488,34 +497,124 @@ def _resolve_relative_to(raw: str, base: Path) -> Path:
     return base / path
 
 
-def _resolve_config_file_path(config_path: str | Path | None = None) -> Path:
-    """Resolve the config.yml path: explicit arg > GDSTT_CONFIG > <data_dir>/config.yml.
+def _user_config_path() -> Path:
+    """Return the OS-specific per-user config path for a global install.
 
-    The path is a bootstrap pointer to the file, not an application setting, so the
-    only environment read here is the optional ``GDSTT_CONFIG`` override and the
-    ``DATA_DIR`` hint that locates the default ``./data`` directory.
+    * Windows: ``%APPDATA%/gdstt/config.yml`` (falling back to
+      ``~/AppData/Roaming`` when ``%APPDATA%`` is unset).
+    * macOS: ``~/Library/Application Support/gdstt/config.yml``.
+    * Linux/other: ``${XDG_CONFIG_HOME:-~/.config}/gdstt/config.yml``.
+
+    Pure and testable by monkeypatching ``sys.platform`` and the relevant
+    environment variables; ``~`` is always expanded.
+    """
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "").strip()
+        base = Path(appdata) if appdata else Path("~/AppData/Roaming")
+    elif sys.platform == "darwin":
+        base = Path("~/Library/Application Support")
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+        base = Path(xdg) if xdg else Path("~/.config")
+    return (base / APP_DIR_NAME / CONFIG_FILE_NAME).expanduser()
+
+
+def _resolve_config_file_path(config_path: str | Path | None = None) -> Path:
+    """Resolve the bootstrap config.yml path (before any pointer is followed).
+
+    Priority: explicit ``--config`` arg > ``GDSTT_CONFIG`` env > ``<DATA_DIR>/
+    config.yml`` *only when* ``DATA_DIR`` is explicitly set > the per-user config
+    path (:func:`_user_config_path`). The current working directory's ``./data``
+    is no longer auto-selected: a global install must opt in via ``DATA_DIR`` or
+    ``GDSTT_CONFIG``.
     """
     if config_path:
         return Path(config_path)
     env_path = os.environ.get(CONFIG_PATH_ENV_VAR, "").strip()
     if env_path:
         return Path(env_path)
-    dotenv_path = _dotenv_path()
-    data_dir = _resolve_relative_to_dotenv(
-        os.environ.get("DATA_DIR", "data").strip() or "data",
-        dotenv_path,
-    )
-    return data_dir / CONFIG_FILE_NAME
+    data_dir_raw = os.environ.get(DATA_DIR_ENV_VAR)
+    if data_dir_raw is not None and data_dir_raw.strip():
+        data_dir = _resolve_relative_to_dotenv(data_dir_raw.strip(), _dotenv_path())
+        return data_dir / CONFIG_FILE_NAME
+    return _user_config_path()
+
+
+def _read_pointer_target(path: Path) -> str | None:
+    """Return the ``config_file`` target if ``path`` is a forwarding pointer.
+
+    A pointer file is a mapping whose *only* key is ``config_file``. If the file
+    is missing, empty, or not such a pointer, ``None`` is returned and the file is
+    treated as a normal config. A file that carries ``config_file`` alongside any
+    other key is rejected with ``ValueError``.
+    """
+    if not path.exists():
+        return None
+    text = _read_config_text(path)
+    if not text.strip():
+        return None
+    raw = _parse_config_yaml(text)
+    if not isinstance(raw, dict) or POINTER_KEY not in raw:
+        return None
+    extra = sorted(key for key in raw if key != POINTER_KEY)
+    if extra:
+        raise ValueError(
+            f"pointer config {path} may only contain {POINTER_KEY!r}; "
+            f"found extra keys: {', '.join(map(str, extra))}"
+        )
+    target = raw[POINTER_KEY]
+    if not isinstance(target, str) or not target.strip():
+        raise ValueError(
+            f"pointer config {path} {POINTER_KEY!r} must be a non-empty path string"
+        )
+    return target.strip()
+
+
+def _resolve_pointer_target(target: str, pointer_dir: Path) -> Path:
+    """Expand ``~``/``$VAR`` in a pointer target and anchor it to the pointer dir."""
+    expanded = os.path.expanduser(os.path.expandvars(target))
+    path = Path(expanded)
+    if not path.is_absolute():
+        path = pointer_dir / path
+    return path
+
+
+def resolve_effective_config_path(
+    config_path: str | Path | None = None,
+) -> tuple[Path, Path]:
+    """Resolve (bootstrap_path, effective_path), following forwarding pointers.
+
+    ``bootstrap_path`` is where lookup starts (CLI flag/env/DATA_DIR/user path).
+    A config file may instead contain only ``config_file: <path>``; the resolver
+    follows that chain (relative paths anchored to the pointer's directory, with
+    ``~``/``$VAR`` expansion) until it reaches a non-pointer file, which becomes
+    ``effective_path``. Pointer loops (including self-reference) are rejected.
+    """
+    bootstrap = _resolve_config_file_path(config_path)
+    effective = bootstrap
+    seen: list[Path] = []
+    while True:
+        try:
+            resolved_key = effective.resolve()
+        except OSError:
+            resolved_key = effective
+        if resolved_key in seen:
+            chain = " -> ".join(str(p) for p in [*seen, resolved_key])
+            raise ValueError(f"pointer config loop detected: {chain}")
+        seen.append(resolved_key)
+        target = _read_pointer_target(effective)
+        if target is None:
+            return bootstrap, effective
+        effective = _resolve_pointer_target(target, effective.parent)
 
 
 def resolve_config_file_path(config_path: str | Path | None = None) -> Path:
-    """Public resolver for the active config.yml path (CLI flag/env/data-dir).
+    """Public resolver for the effective config.yml path (CLI flag/env/user path).
 
-    Thin wrapper over :func:`_resolve_config_file_path` so callers like the CLI's
-    ``doctor`` can report which file ``load_config`` would read without reaching
-    into a private helper.
+    Follows forwarding pointers so callers like the CLI's ``doctor`` report the
+    real file ``load_config`` reads, not an intermediate pointer.
     """
-    return _resolve_config_file_path(config_path)
+    return resolve_effective_config_path(config_path)[1]
 
 
 def _as_mapping(value: object, label: str) -> dict:
@@ -788,8 +887,11 @@ def load_config(
     When the resolved config file is missing or empty, build the configuration from
     the existing `.env`/environment, persist it as YAML for future runs, and return
     the in-memory values. Otherwise read settings solely from the YAML file.
+
+    Forwarding pointers (a file containing only ``config_file: <path>``) are
+    followed so the effective target file is what gets read and written.
     """
-    resolved = _resolve_config_file_path(config_path)
+    resolved = resolve_effective_config_path(config_path)[1]
     text = _read_config_text(resolved) if resolved.exists() else ""
     if text.strip():
         raw = _parse_config_yaml(text)
@@ -821,8 +923,9 @@ def migrate_config(
 
     Raises if the target already exists and ``force`` is False. Validation of
     provider secrets is skipped so migration works for inspection-only setups.
+    Forwarding pointers are followed so migration writes the effective target.
     """
-    resolved = _resolve_config_file_path(config_path)
+    resolved = resolve_effective_config_path(config_path)[1]
     if resolved.exists() and _read_config_text(resolved).strip() and not force:
         raise ValueError(
             f"{resolved} already exists; pass --force to overwrite it."
