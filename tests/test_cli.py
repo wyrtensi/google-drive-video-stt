@@ -92,7 +92,7 @@ def test_auth_dispatch(mocker, tmp_path):
 
     cli.main(["auth"])
 
-    flow_mock.assert_called_once_with(tmp_path, manual=False, response_url=None)
+    flow_mock.assert_called_once_with(config=cfg, manual=False, response_url=None)
 
 
 def test_auth_skips_provider_validation(mocker, tmp_path):
@@ -113,7 +113,7 @@ def test_auth_passes_response_url(mocker, tmp_path):
     cli.main(["auth", "http://localhost/?code=abc"])
 
     flow_mock.assert_called_once_with(
-        tmp_path,
+        config=cfg,
         manual=False,
         response_url="http://localhost/?code=abc",
     )
@@ -126,7 +126,66 @@ def test_auth_manual_dispatch(mocker, tmp_path):
 
     cli.main(["auth", "--manual"])
 
-    flow_mock.assert_called_once_with(tmp_path, manual=True, response_url=None)
+    flow_mock.assert_called_once_with(config=cfg, manual=True, response_url=None)
+
+
+def test_auth_import_credentials_dispatch(mocker, tmp_path):
+    import_mock = mocker.patch(
+        "src.cli.import_google_credentials", return_value=tmp_path / "config.yml"
+    )
+
+    cli.main(["auth", "import-credentials", "/some/creds.json"])
+
+    import_mock.assert_called_once_with("/some/creds.json")
+
+
+def test_auth_use_files_dispatch(mocker, tmp_path):
+    use_mock = mocker.patch(
+        "src.cli.use_google_files", return_value=tmp_path / "config.yml"
+    )
+
+    cli.main(
+        [
+            "auth",
+            "use-files",
+            "--credentials-file",
+            "/c/creds.json",
+            "--token-file",
+            "/c/tok.json",
+        ]
+    )
+
+    use_mock.assert_called_once_with("/c/creds.json", token_file="/c/tok.json")
+
+
+def test_auth_use_files_defaults_token_file(mocker, tmp_path):
+    use_mock = mocker.patch(
+        "src.cli.use_google_files", return_value=tmp_path / "config.yml"
+    )
+
+    cli.main(["auth", "use-files", "--credentials-file", "/c/creds.json"])
+
+    use_mock.assert_called_once_with("/c/creds.json", token_file=None)
+
+
+def test_doctor_reports_google_source_without_secrets(mocker, capsys, tmp_path):
+    from dataclasses import replace
+
+    cfg = replace(
+        make_config(folder_ids=["f1"], data_dir=tmp_path),
+        google_credentials={"installed": {"client_secret": "sup3rsecret"}},
+        google_token={"refresh_token": "rt-secret"},
+    )
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service")
+
+    cli.main(["doctor"])
+
+    out = capsys.readouterr().out
+    assert "Google credentials: inline" in out
+    assert "Google token: inline" in out
+    assert "sup3rsecret" not in out
+    assert "rt-secret" not in out
 
 
 def test_doctor_uses_drive_only_config_and_skips_auth_by_default(
@@ -233,7 +292,7 @@ def test_run_once_dispatch(mocker, tmp_path):
     cli.main(["run-once"])
 
     load_mock.assert_called_once_with()
-    build_mock.assert_called_once_with(data_dir=tmp_path)
+    build_mock.assert_called_once_with(config=cfg)
     run_once_mock.assert_called_once_with(
         service,
         cfg,
@@ -358,7 +417,7 @@ def test_latest_dispatch_uses_first_folder(mocker, tmp_path):
     cli.main(["latest"])
 
     load_mock.assert_called_once_with()
-    build_mock.assert_called_once_with(data_dir=tmp_path)
+    build_mock.assert_called_once_with(config=cfg)
     find_mock.assert_called_once_with(service, "folderA")
     target_mock.assert_called_once_with(
         service,

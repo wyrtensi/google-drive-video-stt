@@ -74,6 +74,21 @@ Deepgram (и, при включённых OpenAI-пресетах, OpenAI): `run
 браузерный flow на localhost. `--manual` печатает URL авторизации; переданный
 `response_url` завершает ручной обмен.
 
+### `auth-import-credentials <path>`
+
+Также доступно как `gdstt auth import-credentials <path>`. Прочитать скачанный
+OAuth client JSON и записать его inline в конфиг под `google.credentials`
+(секреты не печатаются). Сбрасывает любой указатель `google.credentials_file`,
+чтобы источник был один.
+
+### `auth-use-files --credentials-file PATH [--token-file PATH]`
+
+Также доступно как `gdstt auth use-files ...`. Переключить
+Google-аутентификацию в файловый режим: записать
+`google.credentials_file`/`google.token_file` и удалить inline
+`google.credentials`/`google.token`. По умолчанию `--token-file` —
+`<папка credentials>/token.json`.
+
 ### `latest [--folder ID] [--dry-run]`
 
 Обработать самый свежий mp4 в папке (первой из `FOLDER_IDS`, если не задан

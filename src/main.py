@@ -804,7 +804,7 @@ def main() -> None:
         raise SystemExit(1)
 
     try:
-        service = build_drive_service(data_dir=config.data_dir)
+        service = build_drive_service(config=config)
     except (RefreshError, AuthError) as exc:
         logger.exception("OAuth bootstrap failed; exiting for restart")
         notify.notify_error(

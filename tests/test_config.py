@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -12,12 +13,14 @@ from src.config import (
     config_set,
     config_unset,
     copy_prompt_assets,
+    import_google_credentials,
     init_config,
     link_config,
     load_config,
     migrate_config,
     resolve_config_file_path,
     resolve_effective_config_path,
+    use_google_files,
 )
 from src.presets import PACKAGED_PROMPT_ASSETS
 
@@ -1743,3 +1746,189 @@ def test_config_set_invalid_leaves_file_unchanged(tmp_path):
         config_set("output.target", "s3", config_path=config_file)
 
     assert config_file.read_text(encoding="utf-8") == before
+
+
+# --- google auth config ------------------------------------------------------
+
+
+def test_yaml_google_inline_credentials_and_token(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {"keypoints": {"enabled": False}},
+            "google": {
+                "credentials": {"installed": {"client_id": "cid", "client_secret": "x"}},
+                "token": {"token": "t", "refresh_token": "r"},
+            },
+        },
+    )
+
+    cfg = load_config(config_path=config_file)
+
+    assert cfg.google_credentials == {
+        "installed": {"client_id": "cid", "client_secret": "x"}
+    }
+    assert cfg.google_token == {"token": "t", "refresh_token": "r"}
+    assert cfg.google_credentials_file is None
+    assert cfg.google_token_file is None
+    assert cfg.config_file == config_file
+
+
+def test_yaml_google_file_paths_resolve_relative(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {"keypoints": {"enabled": False}},
+            "google": {
+                "credentials_file": "secrets/creds.json",
+                "token_file": "/abs/token.json",
+            },
+        },
+    )
+
+    cfg = load_config(config_path=config_file)
+
+    assert cfg.google_credentials is None
+    assert cfg.google_credentials_file == tmp_path / "secrets" / "creds.json"
+    assert cfg.google_token_file == Path("/abs/token.json")
+
+
+def test_yaml_google_back_compat_data_dir_fallback(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {"stt": {"provider": "disabled"}, "presets": {"keypoints": {"enabled": False}}},
+    )
+
+    cfg = load_config(config_path=config_file)
+
+    assert cfg.google_credentials is None
+    assert cfg.google_token is None
+    assert cfg.google_credentials_file is None
+    assert cfg.google_token_file is None
+
+
+def test_yaml_google_credentials_both_inline_and_file_fails(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {"keypoints": {"enabled": False}},
+            "google": {
+                "credentials": {"installed": {"client_id": "cid"}},
+                "credentials_file": "creds.json",
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="both set"):
+        load_config(config_path=config_file)
+
+
+def test_yaml_google_token_both_inline_and_file_fails(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {"keypoints": {"enabled": False}},
+            "google": {
+                "token": {"token": "t"},
+                "token_file": "token.json",
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="both set"):
+        load_config(config_path=config_file)
+
+
+def test_import_google_credentials_writes_inline(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    creds_src = tmp_path / "download.json"
+    creds_src.write_text(
+        json.dumps({"installed": {"client_id": "cid", "client_secret": "sek"}})
+    )
+
+    import_google_credentials(creds_src, config_path=config_file)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["google"]["credentials"] == {
+        "installed": {"client_id": "cid", "client_secret": "sek"}
+    }
+    assert "credentials_file" not in data["google"]
+
+
+def test_import_google_credentials_clears_file_pointer(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set("google.credentials_file", "old/creds.json", config_path=config_file)
+    creds_src = tmp_path / "download.json"
+    creds_src.write_text(json.dumps({"installed": {"client_id": "cid"}}))
+
+    import_google_credentials(creds_src, config_path=config_file)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert "credentials_file" not in data["google"]
+    assert data["google"]["credentials"] == {"installed": {"client_id": "cid"}}
+
+
+def test_use_google_files_switches_and_clears_inline(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    creds_src = tmp_path / "download.json"
+    creds_src.write_text(json.dumps({"installed": {"client_id": "cid"}}))
+    import_google_credentials(creds_src, config_path=config_file)
+    config_set("google.token.token", "inline-tok", config_path=config_file)
+
+    creds_file = tmp_path / "creds" / "client.json"
+    use_google_files(creds_file, config_path=config_file)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert "credentials" not in data["google"]
+    assert "token" not in data["google"]
+    assert data["google"]["credentials_file"] == str(creds_file)
+    assert data["google"]["token_file"] == str(creds_file.parent / "token.json")
+
+
+def test_use_google_files_honors_explicit_token_file(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    creds_file = tmp_path / "client.json"
+    token_file = tmp_path / "elsewhere" / "tok.json"
+
+    use_google_files(creds_file, token_file=token_file, config_path=config_file)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["google"]["token_file"] == str(token_file)
+
+
+def test_config_get_masks_inline_google_secrets(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    creds_src = tmp_path / "download.json"
+    creds_src.write_text(
+        json.dumps({"installed": {"client_id": "cid", "client_secret": "sup3rsecret"}})
+    )
+    import_google_credentials(creds_src, config_path=config_file)
+    config_set("google.token.refresh_token", "rt-secret", config_path=config_file)
+    config_set("google.token.token", "tok-secret", config_path=config_file)
+
+    output = config_get(config_path=config_file)
+
+    assert "sup3rsecret" not in output
+    assert "rt-secret" not in output
+    assert "tok-secret" not in output
+    assert "***" in output
+
+
+def test_generated_config_prefers_inline_and_omits_file_keys(tmp_path):
+    config_file = tmp_path / "config.yml"
+    init_config(config_path=config_file)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    # The generated config ships an (empty) google block without file pointers.
+    assert "google" in data
+    assert "credentials_file" not in data["google"]
+    assert "token_file" not in data["google"]

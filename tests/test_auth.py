@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 from google.auth.exceptions import RefreshError
 
 from src import auth
@@ -270,7 +271,7 @@ def test_build_drive_service_uses_config_when_no_dir(mocker, tmp_path):
     auth.build_drive_service()
 
     load_config_mock.assert_called_once_with(validate_providers=False)
-    load_mock.assert_called_once_with(tmp_path)
+    load_mock.assert_called_once_with(config=fake_cfg)
 
 
 def test_auth_main_uses_drive_only_config(mocker, tmp_path):
@@ -409,4 +410,152 @@ def test_load_credentials_refresh_writes_token_with_secure_mode(tmp_path, mocker
 
     auth.load_credentials(tmp_path)
 
+    _assert_secure_token_mode(token_file)
+
+
+# --- config-owned (inline-first) Google auth ---------------------------------
+
+
+def _make_config(tmp_path, **overrides):
+    from dataclasses import replace
+
+    from tests.test_main import make_config
+
+    base = make_config(data_dir=tmp_path)
+    return replace(base, **overrides)
+
+
+def _inline_token_payload():
+    return {
+        "token": "access",
+        "refresh_token": "refresh",
+        "client_id": "cid",
+        "client_secret": "csec",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "scopes": list(auth.SCOPES),
+    }
+
+
+def test_load_credentials_uses_inline_token(tmp_path, mocker):
+    config = _make_config(tmp_path, google_token=_inline_token_payload())
+
+    fake_creds = MagicMock()
+    fake_creds.valid = True
+    fake_creds.expired = False
+    from_info = mocker.patch(
+        "src.auth.Credentials.from_authorized_user_info", return_value=fake_creds
+    )
+
+    result = auth.load_credentials(config=config)
+
+    assert result is fake_creds
+    from_info.assert_called_once_with(_inline_token_payload(), auth.SCOPES)
+
+
+def test_load_credentials_inline_token_refresh_persists_into_config(tmp_path, mocker):
+    config_file = tmp_path / "config.yml"
+    config_file.write_text("google:\n  token:\n    token: old\n", encoding="utf-8")
+    config = _make_config(
+        tmp_path,
+        google_token=_inline_token_payload(),
+        config_file=config_file,
+    )
+
+    fake_creds = MagicMock()
+    fake_creds.valid = False
+    fake_creds.expired = True
+    fake_creds.refresh_token = "refresh"
+    fake_creds.to_json.return_value = '{"token": "fresh", "scopes": ["x"]}'
+    mocker.patch("src.auth.Credentials.from_authorized_user_info", return_value=fake_creds)
+    mocker.patch("src.auth.Request")
+
+    auth.load_credentials(config=config)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["google"]["token"] == {"token": "fresh", "scopes": ["x"]}
+    # The inline token was never written into a file beside data_dir.
+    assert not (tmp_path / "token.json").exists()
+
+
+def test_load_credentials_uses_token_file_path(tmp_path, mocker):
+    token_file = tmp_path / "nested" / "token.json"
+    token_file.parent.mkdir()
+    _write_token(token_file)
+    config = _make_config(tmp_path, google_token_file=token_file)
+
+    fake_creds = MagicMock()
+    fake_creds.valid = True
+    fake_creds.expired = False
+    from_file = mocker.patch(
+        "src.auth.Credentials.from_authorized_user_file", return_value=fake_creds
+    )
+
+    result = auth.load_credentials(config=config)
+
+    assert result is fake_creds
+    from_file.assert_called_once_with(str(token_file), auth.SCOPES)
+
+
+def test_load_credentials_config_falls_back_to_data_dir(tmp_path, mocker):
+    token_file = tmp_path / "token.json"
+    _write_token(token_file)
+    config = _make_config(tmp_path)  # no google.* set
+
+    fake_creds = MagicMock()
+    fake_creds.valid = True
+    fake_creds.expired = False
+    from_file = mocker.patch(
+        "src.auth.Credentials.from_authorized_user_file", return_value=fake_creds
+    )
+
+    auth.load_credentials(config=config)
+
+    from_file.assert_called_once_with(str(token_file), auth.SCOPES)
+
+
+def test_run_interactive_flow_uses_inline_credentials(tmp_path, mocker):
+    config = _make_config(
+        tmp_path,
+        google_credentials={"installed": {"client_id": "cid"}},
+        google_token={"token": "old", "scopes": list(auth.SCOPES)},
+        config_file=tmp_path / "config.yml",
+    )
+    (tmp_path / "config.yml").write_text("google: {}\n", encoding="utf-8")
+
+    fake_creds = MagicMock()
+    fake_creds.to_json.return_value = '{"token": "new", "scopes": ["x"]}'
+    flow = MagicMock()
+    flow.run_local_server.return_value = fake_creds
+    flow_cls = mocker.patch(
+        "src.auth.InstalledAppFlow.from_client_config", return_value=flow
+    )
+
+    auth.run_interactive_flow(config=config)
+
+    flow_cls.assert_called_once_with({"installed": {"client_id": "cid"}}, auth.SCOPES)
+    # No token file written; the fresh token went back into google.token.
+    assert not (tmp_path / "token.json").exists()
+    data = yaml.safe_load((tmp_path / "config.yml").read_text(encoding="utf-8"))
+    assert data["google"]["token"] == {"token": "new", "scopes": ["x"]}
+
+
+def test_run_interactive_flow_file_mode_writes_token_file(tmp_path, mocker):
+    creds_file = tmp_path / "creds.json"
+    creds_file.write_text(json.dumps({"installed": {"client_id": "cid"}}))
+    token_file = tmp_path / "tok.json"
+    config = _make_config(
+        tmp_path,
+        google_credentials_file=creds_file,
+        google_token_file=token_file,
+    )
+
+    fake_creds = MagicMock()
+    fake_creds.to_json.return_value = '{"new": "token"}'
+    flow = MagicMock()
+    flow.run_local_server.return_value = fake_creds
+    mocker.patch("src.auth.InstalledAppFlow.from_client_config", return_value=flow)
+
+    auth.run_interactive_flow(config=config)
+
+    assert token_file.read_text() == '{"new": "token"}'
     _assert_secure_token_mode(token_file)

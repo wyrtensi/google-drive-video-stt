@@ -77,6 +77,17 @@ class Config:
     deepgram_keyterms_file: Path = DEEPGRAM_DEFAULT_KEYTERMS_FILE
     deepgram_keyterms: tuple[str, ...] = ()
     presets: tuple[Preset, ...] = ()
+    # Google OAuth is config-owned and inline-first. ``google_credentials``/
+    # ``google_token`` hold inline mappings (the OAuth client JSON and the saved
+    # token); the ``*_file`` paths point at on-disk copies instead. When all four
+    # are unset the loaders fall back to ``data_dir/credentials.json`` and
+    # ``data_dir/token.json`` for back-compat. The config file path is carried so
+    # that refreshing an inline token can be persisted back into the YAML.
+    google_credentials: dict | None = None
+    google_token: dict | None = None
+    google_credentials_file: Path | None = None
+    google_token_file: Path | None = None
+    config_file: Path | None = None
 
 
 class UniqueKeyLoader(yaml.SafeLoader):
@@ -504,6 +515,47 @@ def _resolve_relative_to(raw: str, base: Path) -> Path:
     return base / path
 
 
+def _resolve_google_auth(
+    google: dict,
+    base: Path | None,
+) -> tuple[dict | None, dict | None, Path | None, Path | None]:
+    """Resolve the ``google:`` block into (credentials, token, creds_file, token_file).
+
+    Inline ``credentials``/``token`` mappings win; otherwise ``credentials_file``/
+    ``token_file`` paths are returned (resolved relative to ``base`` — the config
+    file's parent — unless absolute). Supplying BOTH an inline mapping and a file
+    pointer for the same object is rejected so generated configs and ``config set``
+    writes never carry an ambiguous source.
+    """
+    credentials = google.get("credentials")
+    if credentials is not None and not isinstance(credentials, dict):
+        raise ValueError("google.credentials must be a mapping in " + CONFIG_FILE_NAME)
+    token = google.get("token")
+    if token is not None and not isinstance(token, dict):
+        raise ValueError("google.token must be a mapping in " + CONFIG_FILE_NAME)
+
+    credentials_file_raw = _yaml_str(google.get("credentials_file"))
+    token_file_raw = _yaml_str(google.get("token_file"))
+
+    if credentials is not None and credentials_file_raw:
+        raise ValueError(
+            "google.credentials and google.credentials_file are both set; "
+            "use inline credentials or a file, not both."
+        )
+    if token is not None and token_file_raw:
+        raise ValueError(
+            "google.token and google.token_file are both set; "
+            "use an inline token or a file, not both."
+        )
+
+    def _resolve(raw: str) -> Path:
+        return _resolve_relative_to(raw, base) if base is not None else Path(raw)
+
+    credentials_file = _resolve(credentials_file_raw) if credentials_file_raw else None
+    token_file = _resolve(token_file_raw) if token_file_raw else None
+    return credentials, token, credentials_file, token_file
+
+
 def _user_config_path() -> Path:
     """Return the OS-specific per-user config path for a global install.
 
@@ -660,7 +712,15 @@ def _config_from_yaml(
     stt = _as_mapping(raw.get("stt"), "stt")
     deepgram = _as_mapping(stt.get("deepgram"), "stt.deepgram")
     openai = _as_mapping(raw.get("openai"), "openai")
+    google = _as_mapping(raw.get("google"), "google")
     config_presets = _as_mapping(raw.get("presets"), "presets")
+
+    (
+        google_credentials,
+        google_token,
+        google_credentials_file,
+        google_token_file,
+    ) = _resolve_google_auth(google, base)
 
     folder_ids_raw = raw.get("folder_ids") or []
     if isinstance(folder_ids_raw, str):
@@ -804,6 +864,11 @@ def _config_from_yaml(
         deepgram_keyterms_file=deepgram_keyterms_file,
         deepgram_keyterms=deepgram_keyterms,
         presets=presets,
+        google_credentials=google_credentials,
+        google_token=google_token,
+        google_credentials_file=google_credentials_file,
+        google_token_file=google_token_file,
+        config_file=config_file,
     )
 
 
@@ -937,6 +1002,10 @@ def _default_config_dict(
             "batch": False,
             "max_parallel": 4,
         },
+        # Google auth is inline-first and config-owned. The generated config ships an
+        # empty block (no *_file pointers) so the data_dir fallback applies until the
+        # operator runs `gdstt auth import-credentials` / `auth use-files`.
+        "google": {},
         "presets": presets,
     }
     return config
@@ -958,6 +1027,29 @@ def copy_prompt_assets(target_dir: Path, *, overwrite: bool = False) -> list[Pat
         dest.write_text(load_packaged_prompt(name), encoding="utf-8")
         written.append(dest)
     return written
+
+
+def _google_to_yaml_dict(config: Config, config_file: Path | None) -> dict:
+    """Serialize the Google auth block, inline-first.
+
+    Inline ``credentials``/``token`` mappings are written verbatim (masking happens
+    at display time, not on disk). The ``*_file`` pointers are only emitted in file
+    mode (i.e. when no inline mapping is present and a file path is set); they are
+    written relative to the config file's parent so they round-trip. When nothing is
+    configured an empty mapping is returned so the loader's data_dir fallback applies.
+    """
+    block: dict[str, object] = {}
+    if config.google_credentials is not None:
+        block["credentials"] = config.google_credentials
+    elif config.google_credentials_file is not None:
+        block["credentials_file"] = _relpath_for_config(
+            config.google_credentials_file, config_file
+        )
+    if config.google_token is not None:
+        block["token"] = config.google_token
+    elif config.google_token_file is not None:
+        block["token_file"] = _relpath_for_config(config.google_token_file, config_file)
+    return block
 
 
 def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dict:
@@ -1002,6 +1094,7 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "max_parallel": config.openai_max_parallel,
             "keypoints": config.openai_keypoints,
         },
+        "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
         # the prompt text stays owned by the .md assets; disabled built-ins (e.g.
         # keypoints under OPENAI_KEYPOINTS=false) are still written with their
@@ -1443,5 +1536,73 @@ def config_unset(key: str, *, config_path: str | Path | None = None) -> Path:
     parts = _split_key(key)
     if not _unset_nested(data, parts):
         raise ValueError(f"config key {key!r} is not set")
+    _atomic_write_validated(effective, data, config_path=config_path)
+    return effective
+
+
+# --- google auth config helpers ---------------------------------------------
+
+
+def import_google_credentials(
+    credentials_path: str | Path, *, config_path: str | Path | None = None
+) -> Path:
+    """Read an OAuth client JSON and store it inline under ``google.credentials``.
+
+    The file's parsed structure (the Desktop-app client config, e.g. the
+    ``{"installed": {...}}`` mapping) is written verbatim into the effective config
+    so it is config-owned. Any pre-existing ``google.credentials_file`` pointer is
+    cleared so the two sources never both apply. Validation rejects a malformed JSON
+    file and any inline/file conflict before the write lands.
+    """
+    src = Path(credentials_path)
+    try:
+        parsed = json.loads(src.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            f"OAuth client credentials at {src} could not be read: {exc}"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"OAuth client credentials at {src} must be a JSON object."
+        )
+
+    effective, data = _load_effective_yaml_dict(config_path)
+    google = data.setdefault("google", {})
+    if not isinstance(google, dict):
+        google = {}
+        data["google"] = google
+    google["credentials"] = parsed
+    google.pop("credentials_file", None)
+    _atomic_write_validated(effective, data, config_path=config_path)
+    return effective
+
+
+def use_google_files(
+    credentials_file: str | Path,
+    *,
+    token_file: str | Path | None = None,
+    config_path: str | Path | None = None,
+) -> Path:
+    """Switch Google auth to file mode and clear any inline credentials/token.
+
+    Writes ``google.credentials_file`` (and ``google.token_file``) and removes the
+    inline ``google.credentials``/``google.token`` mappings so the file pointers are
+    the single source. ``token_file`` defaults to ``<credentials parent>/token.json``.
+    """
+    creds_path = Path(credentials_file)
+    if token_file is None:
+        token_path = creds_path.parent / "token.json"
+    else:
+        token_path = Path(token_file)
+
+    effective, data = _load_effective_yaml_dict(config_path)
+    google = data.setdefault("google", {})
+    if not isinstance(google, dict):
+        google = {}
+        data["google"] = google
+    google.pop("credentials", None)
+    google.pop("token", None)
+    google["credentials_file"] = str(creds_path)
+    google["token_file"] = str(token_path)
     _atomic_write_validated(effective, data, config_path=config_path)
     return effective

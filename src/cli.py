@@ -17,12 +17,14 @@ from src.config import (
     config_get,
     config_set,
     config_unset,
+    import_google_credentials,
     init_config,
     link_config,
     load_config,
     migrate_config,
     resolve_config_file_path,
     resolve_effective_config_path,
+    use_google_files,
 )
 from src.stt.transcribe import transcribe_file
 
@@ -143,11 +145,32 @@ def cmd_auth(args: argparse.Namespace) -> None:
     config = load_config(validate_providers=False)
     config.data_dir.mkdir(parents=True, exist_ok=True)
     auth.run_interactive_flow(
-        config.data_dir,
+        config=config,
         manual=args.manual,
         response_url=args.response_url,
     )
-    logger.info("Token saved to %s", config.data_dir / "token.json")
+    logger.info("Token saved")
+
+
+def cmd_auth_import_credentials(args: argparse.Namespace) -> None:
+    try:
+        path = import_google_credentials(args.path)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc
+    print(f"Imported OAuth client credentials into {path}")
+
+
+def cmd_auth_use_files(args: argparse.Namespace) -> None:
+    try:
+        path = use_google_files(
+            args.credentials_file,
+            token_file=args.token_file,
+        )
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc
+    print(f"Switched Google auth to file mode in {path}")
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -156,7 +179,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def cmd_run_once(args: argparse.Namespace) -> None:
     config = load_config()
-    service = auth.build_drive_service(data_dir=config.data_dir)
+    service = auth.build_drive_service(config=config)
     main_module.run_once(
         service,
         config,
@@ -168,7 +191,7 @@ def cmd_run_once(args: argparse.Namespace) -> None:
 
 def cmd_process(args: argparse.Namespace) -> None:
     config = load_config()
-    service = auth.build_drive_service(data_dir=config.data_dir)
+    service = auth.build_drive_service(config=config)
     is_folder = True if args.folder else None
     telemetry = main_module.process_target(
         service,
@@ -194,7 +217,7 @@ def cmd_latest(args: argparse.Namespace) -> None:
             "%d folders configured; using the first (%s). Pass --folder to pick another.",
             len(config.folder_ids), folder_id,
         )
-    service = auth.build_drive_service(data_dir=config.data_dir)
+    service = auth.build_drive_service(config=config)
     newest = drive.find_newest_mp4(service, folder_id)
     if newest is None:
         logger.info("Folder %s has no mp4 files", folder_id)
@@ -226,6 +249,28 @@ def _print_preset_dag(config) -> None:
         print(f"  {preset.name} <- {deps}")
 
 
+def _describe_google_credentials(config) -> str:
+    """Describe the OAuth client source for doctor without leaking secrets."""
+    if config.google_credentials is not None:
+        return "inline (config.google.credentials)"
+    if config.google_credentials_file is not None:
+        present = "OK" if Path(config.google_credentials_file).exists() else "missing"
+        return f"file {config.google_credentials_file} ({present})"
+    fallback = config.data_dir / "credentials.json"
+    return f"data_dir {fallback} ({'OK' if fallback.exists() else 'missing'})"
+
+
+def _describe_google_token(config) -> str:
+    """Describe the saved-token source for doctor without leaking secrets."""
+    if config.google_token is not None:
+        return "inline (config.google.token)"
+    if config.google_token_file is not None:
+        present = "OK" if Path(config.google_token_file).exists() else "missing"
+        return f"file {config.google_token_file} ({present})"
+    fallback = config.data_dir / "token.json"
+    return f"data_dir {fallback} ({'OK' if fallback.exists() else 'missing'})"
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     config = load_config(validate_providers=False)
     credentials_path = config.data_dir / "credentials.json"
@@ -236,6 +281,10 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print(f"DATA_DIR: {config.data_dir}")
     print(f"credentials.json: {'OK' if credentials_path.exists() else 'missing'}")
     print(f"token.json: {'OK' if token_path.exists() else 'missing'}")
+    # Report the Google auth source without ever printing secrets (client_secret /
+    # token / refresh_token stay masked; only the source kind/location is shown).
+    print(f"Google credentials: {_describe_google_credentials(config)}")
+    print(f"Google token: {_describe_google_token(config)}")
     print(f"FOLDER_IDS: {len(config.folder_ids)} configured")
     print(f"STT_PROVIDER: {config.stt_provider or 'not configured'}")
     _print_preset_dag(config)
@@ -244,7 +293,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         print("Drive auth: not checked (use --drive)")
         return
 
-    service = auth.build_drive_service(data_dir=config.data_dir)
+    service = auth.build_drive_service(config=config)
     print("Drive auth: OK")
     for folder_id in config.folder_ids:
         items = drive.list_folder_state(service, folder_id)
@@ -328,7 +377,7 @@ def cmd_config_unset(args: argparse.Namespace) -> None:
 
 def cmd_speakers_set(args: argparse.Namespace) -> None:
     config = load_config(validate_providers=False)
-    service = auth.build_drive_service(data_dir=config.data_dir)
+    service = auth.build_drive_service(config=config)
     names = json.dumps(args.names, ensure_ascii=False)
     drive.set_file_app_properties(
         service,
@@ -371,7 +420,7 @@ def cmd_list(args: argparse.Namespace) -> None:
     if not folder_ids:
         logger.error("No folders to inspect; set FOLDER_IDS or pass --folder")
         raise SystemExit(1)
-    service = auth.build_drive_service(data_dir=config.data_dir)
+    service = auth.build_drive_service(config=config)
     for folder_id in folder_ids:
         items = drive.list_folder_state(service, folder_id)
         print(f"Folder {folder_id}: {len(items)} mp4 file(s)")
@@ -449,6 +498,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="OAuth redirect URL for the manual flow (optional)",
     )
     p_auth.set_defaults(func=cmd_auth)
+
+    p_auth_import = sub.add_parser(
+        "auth-import-credentials",
+        help="Store an OAuth client JSON inline in the config (google.credentials)",
+    )
+    p_auth_import.add_argument(
+        "path", help="Path to the downloaded OAuth client (Desktop app) JSON file"
+    )
+    p_auth_import.set_defaults(func=cmd_auth_import_credentials)
+
+    p_auth_use_files = sub.add_parser(
+        "auth-use-files",
+        help="Switch Google auth to file mode and clear inline credentials/token",
+    )
+    p_auth_use_files.add_argument(
+        "--credentials-file",
+        required=True,
+        metavar="PATH",
+        help="Path the OAuth client JSON lives at (google.credentials_file)",
+    )
+    p_auth_use_files.add_argument(
+        "--token-file",
+        default=None,
+        metavar="PATH",
+        help="Path the saved token lives at (default: <credentials parent>/token.json)",
+    )
+    p_auth_use_files.set_defaults(func=cmd_auth_use_files)
 
     p_run = sub.add_parser(
         "run",
@@ -715,6 +791,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# ``auth`` keeps an optional positional ``response_url`` for the manual flow, which
+# argparse cannot combine with nested subcommands. Rewrite ``auth import-credentials``
+# / ``auth use-files`` into flat top-level commands so the operator still types the
+# spec'd ``gdstt auth <verb>`` form while the parser stays unambiguous.
+_AUTH_SUBCOMMANDS = {
+    "import-credentials": "auth-import-credentials",
+    "use-files": "auth-use-files",
+}
+
+
+def _rewrite_auth_subcommand(argv: list[str]) -> list[str]:
+    # Find the first non-option token (the command), skipping the global --config PATH.
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--config":
+            i += 2
+            continue
+        if token.startswith("--config="):
+            i += 1
+            continue
+        break
+    if i + 1 < len(argv) and argv[i] == "auth" and argv[i + 1] in _AUTH_SUBCOMMANDS:
+        flat = _AUTH_SUBCOMMANDS[argv[i + 1]]
+        return [*argv[:i], flat, *argv[i + 2:]]
+    return argv
+
+
 def main(argv: list[str] | None = None) -> None:
     _configure_console_encoding()
     logging.basicConfig(
@@ -722,6 +826,9 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     parser = build_parser()
+    if argv is None:
+        argv = sys.argv[1:]
+    argv = _rewrite_auth_subcommand(list(argv))
     args = parser.parse_args(argv)
     # --config is a bootstrap pointer to config.yml, not an application setting;
     # surface it through the same GDSTT_CONFIG env var load_config already resolves
