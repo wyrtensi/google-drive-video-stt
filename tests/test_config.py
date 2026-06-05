@@ -8,6 +8,9 @@ from src.config import (
     CONFIG_FILE_NAME,
     _config_to_yaml_dict,
     _user_config_path,
+    config_get,
+    config_set,
+    config_unset,
     copy_prompt_assets,
     init_config,
     link_config,
@@ -1570,4 +1573,173 @@ def test_migrate_keypoints_enabled_writes_prompt_file(monkeypatch, tmp_path):
 
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     assert data["presets"]["keypoints"]["enabled"] is True
+
+
+# --- config get / set / unset -----------------------------------------------
+
+
+def _base_config_file(tmp_path: Path) -> Path:
+    """Create a valid full config (provider disabled) for get/set/unset tests."""
+    config_file = tmp_path / "config.yml"
+    init_config(config_path=config_file)
+    # The default init writes provider=deepgram; disable it so loads don't require
+    # a Deepgram key and so openai.api_key isn't required (keypoints stays enabled).
+    config_set("stt.provider", "disabled", config_path=config_file)
+    config_set("openai.api_key", "sk-base", config_path=config_file)
+    return config_file
+
+
+def test_config_set_openai_api_key_and_model(tmp_path):
+    config_file = _base_config_file(tmp_path)
+
+    config_set("openai.api_key", "sk-new", config_path=config_file)
+    config_set("openai.model", "gpt-5.4", config_path=config_file)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["openai"]["api_key"] == "sk-new"
+    assert data["openai"]["model"] == "gpt-5.4"
+    assert config_get("openai.model", config_path=config_file) == "gpt-5.4"
+
+
+def test_config_set_output_dir_sets_folder_target(tmp_path):
+    config_file = _base_config_file(tmp_path)
+
+    config_set("output.dir", "out", config_path=config_file)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["output"]["dir"] == "out"
+    assert data["output"]["target"] == "folder"
+
+
+def test_config_set_output_drive_true_sets_drive_target(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set("output.dir", "out", config_path=config_file)
+
+    config_set("output.drive", "true", config_path=config_file)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["output"]["target"] == "drive"
+
+
+def test_config_set_output_drive_false_requires_dir(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    before = config_file.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="config set output.dir"):
+        config_set("output.drive", "false", config_path=config_file)
+
+    assert config_file.read_text(encoding="utf-8") == before
+
+
+def test_config_set_preset_prompt_file(tmp_path):
+    config_file = _base_config_file(tmp_path)
+
+    config_set("presets.keypoints.prompt_file", "prompts/keypoints.md", config_path=config_file)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     assert data["presets"]["keypoints"]["prompt_file"] == "prompts/keypoints.md"
+
+
+def test_config_set_preset_depends_on_parses_list(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    # Make transcript-cleanup a real enabled dependency target.
+    config_set(
+        "presets.transcript-cleanup.prompt_file",
+        "prompts/transcript-cleanup.md",
+        config_path=config_file,
+    )
+    config_set("presets.transcript-cleanup.enabled", "true", config_path=config_file)
+
+    config_set(
+        "presets.keypoints.depends_on", "transcript-cleanup", config_path=config_file
+    )
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["presets"]["keypoints"]["depends_on"] == ["transcript-cleanup"]
+
+
+def test_config_set_preset_depends_on_accepts_json_list(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set(
+        "presets.transcript-cleanup.prompt_file",
+        "prompts/transcript-cleanup.md",
+        config_path=config_file,
+    )
+    config_set("presets.transcript-cleanup.enabled", "true", config_path=config_file)
+
+    config_set(
+        "presets.keypoints.depends_on",
+        '["transcript-cleanup"]',
+        config_path=config_file,
+    )
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["presets"]["keypoints"]["depends_on"] == ["transcript-cleanup"]
+
+
+def test_config_unset_removes_key(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set("proxy_url", "http://proxy", config_path=config_file)
+
+    config_unset("proxy_url", config_path=config_file)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert "proxy_url" not in data
+
+
+def test_config_unset_missing_key_raises(tmp_path):
+    config_file = _base_config_file(tmp_path)
+
+    with pytest.raises(ValueError, match="not set"):
+        config_unset("nope.missing", config_path=config_file)
+
+
+def test_config_get_whole_masks_secrets(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set("openai.api_key", "sk-secret", config_path=config_file)
+
+    output = config_get(config_path=config_file)
+
+    assert "sk-secret" not in output
+    assert "***" in output
+
+
+def test_config_get_single_value_is_unmasked(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set("openai.api_key", "sk-secret", config_path=config_file)
+
+    assert config_get("openai.api_key", config_path=config_file) == "sk-secret"
+
+
+def test_config_get_missing_key_raises(tmp_path):
+    config_file = _base_config_file(tmp_path)
+
+    with pytest.raises(ValueError, match="not set"):
+        config_get("openai.nope", config_path=config_file)
+
+
+def test_config_set_follows_pointer_to_effective_file(tmp_path):
+    real = tmp_path / "real" / "config.yml"
+    real.parent.mkdir()
+    init_config(config_path=real)
+    config_set("stt.provider", "disabled", config_path=real)
+    config_set("openai.api_key", "sk-base", config_path=real)
+    pointer = tmp_path / "pointer.yml"
+    pointer.write_text(f"config_file: {real}\n", encoding="utf-8")
+
+    config_set("openai.model", "gpt-pointer", config_path=pointer)
+
+    # The effective (real) file changed; the pointer file is untouched.
+    assert pointer.read_text(encoding="utf-8") == f"config_file: {real}\n"
+    data = yaml.safe_load(real.read_text(encoding="utf-8"))
+    assert data["openai"]["model"] == "gpt-pointer"
+
+
+def test_config_set_invalid_leaves_file_unchanged(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    before = config_file.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        config_set("output.target", "s3", config_path=config_file)
+
+    assert config_file.read_text(encoding="utf-8") == before

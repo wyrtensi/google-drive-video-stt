@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -1216,3 +1217,231 @@ def link_config(
         copy_prompt_assets(dest_dir / PROMPTS_DIR_NAME)
 
     return dest
+
+
+# --- config get / set / unset -----------------------------------------------
+
+# Secret-bearing keys are masked when the whole config is dumped via ``config get``
+# (with no KEY). Each entry is a tuple of nested mapping keys leading to the value.
+MASKED_KEY_PATHS: tuple[tuple[str, ...], ...] = (
+    ("openai", "api_key"),
+    ("stt", "deepgram", "api_key"),
+    ("google", "client_secret"),
+    ("google", "refresh_token"),
+)
+# Leaf key names whose values are masked wherever they appear (covers nested
+# credentials/token blocks copied verbatim into the YAML).
+MASKED_LEAF_KEYS: frozenset[str] = frozenset(
+    {"client_secret", "refresh_token", "token", "access_token"}
+)
+MASK = "***"
+
+
+def _load_effective_yaml_dict(config_path: str | Path | None = None) -> tuple[Path, dict]:
+    """Return the (effective_path, parsed-mapping) for the active config file.
+
+    Follows forwarding pointers so reads/writes land on the real config, never a
+    pointer. An empty or missing file yields an empty mapping.
+    """
+    effective = resolve_effective_config_path(config_path)[1]
+    text = _read_config_text(effective) if effective.exists() else ""
+    if not text.strip():
+        return effective, {}
+    raw = _parse_config_yaml(text)
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"{effective} must contain a YAML mapping, got: {type(raw).__name__}"
+        )
+    return effective, raw
+
+
+def _mask_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {k: _mask_value(MASK if k in MASKED_LEAF_KEYS else v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mask_value(item) for item in value]
+    return value
+
+
+def _mask_config_dict(data: dict) -> dict:
+    """Return a deep copy of ``data`` with secret values replaced by ``MASK``."""
+    masked = _mask_value(data)
+    assert isinstance(masked, dict)  # noqa: S101 - top-level is always a mapping
+    for path in MASKED_KEY_PATHS:
+        node: object = masked
+        for key in path[:-1]:
+            if not isinstance(node, dict):
+                node = None
+                break
+            node = node.get(key)
+        if isinstance(node, dict) and path[-1] in node and node[path[-1]] not in (None, ""):
+            node[path[-1]] = MASK
+    return masked
+
+
+def _split_key(key: str) -> list[str]:
+    parts = [part for part in key.split(".") if part]
+    if not parts:
+        raise ValueError("config key must be a non-empty dotted path")
+    return parts
+
+
+def _get_nested(data: dict, parts: list[str]) -> object:
+    node: object = data
+    for part in parts:
+        if not isinstance(node, dict) or part not in node:
+            raise KeyError(".".join(parts))
+        node = node[part]
+    return node
+
+
+def _set_nested(data: dict, parts: list[str], value: object) -> None:
+    node = data
+    for part in parts[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            node[part] = child
+        node = child
+    node[parts[-1]] = value
+
+
+def _unset_nested(data: dict, parts: list[str]) -> bool:
+    node: object = data
+    for part in parts[:-1]:
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    if not isinstance(node, dict) or parts[-1] not in node:
+        return False
+    del node[parts[-1]]
+    return True
+
+
+def _format_get_value(value: object) -> str:
+    if isinstance(value, (dict, list)):
+        return _dump_yaml(value).rstrip("\n")
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    return str(value)
+
+
+def config_get(key: str | None = None, *, config_path: str | Path | None = None) -> str:
+    """Return a printable view of the effective config (whole, masked) or one value.
+
+    With no ``key`` the entire effective config is dumped as YAML with secrets
+    masked. With a dotted ``key`` the single value is returned unmasked (the
+    operator explicitly asked for it).
+    """
+    _, data = _load_effective_yaml_dict(config_path)
+    if not key:
+        return _dump_yaml(_mask_config_dict(data)).rstrip("\n")
+    parts = _split_key(key)
+    try:
+        value = _get_nested(data, parts)
+    except KeyError as exc:
+        raise ValueError(f"config key {key!r} is not set") from exc
+    return _format_get_value(value)
+
+
+def _parse_set_value(parts: list[str], raw: str) -> object:
+    """Coerce a raw CLI string into the value type implied by its dotted key."""
+    leaf = parts[-1]
+    # depends_on accepts a JSON list or a comma/space-separated list of names.
+    if leaf == "depends_on":
+        text = raw.strip()
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"depends_on must be a JSON list, got: {raw!r}") from exc
+            if not isinstance(parsed, list):
+                raise ValueError(f"depends_on must be a JSON list, got: {raw!r}")
+            return [str(item).strip() for item in parsed if str(item).strip()]
+        items = [item for item in re.split(r"[,\s]+", text) if item]
+        return items
+    # Booleans for known boolean leaves.
+    if leaf in {"enabled", "batch", "drive", "postprocess", "keyterms_enabled"}:
+        return _parse_bool(raw, default=False)
+    # Integers for known numeric leaves.
+    if leaf in {"poll_interval", "max_parallel"}:
+        try:
+            return int(raw.strip())
+        except ValueError as exc:
+            raise ValueError(f"{leaf} must be an integer, got: {raw!r}") from exc
+    return raw
+
+
+def _atomic_write_validated(
+    effective: Path, data: dict, *, config_path: str | Path | None
+) -> None:
+    """Write ``data`` to ``effective``, validating; leave the file unchanged on failure.
+
+    The original text is snapshotted first; the new YAML is written, then
+    ``load_config(validate_providers=False)`` is run against the effective path. Any
+    validation error restores the original bytes (or removes a freshly created file)
+    and re-raises, so a bad ``set``/``unset`` never corrupts the on-disk config.
+    """
+    existed = effective.exists()
+    original = effective.read_text(encoding="utf-8-sig") if existed else None
+    effective.parent.mkdir(parents=True, exist_ok=True)
+    effective.write_text(_dump_yaml(data), encoding="utf-8")
+    try:
+        load_config(validate_providers=False, config_path=config_path)
+    except Exception:
+        if original is not None:
+            effective.write_text(original, encoding="utf-8")
+        else:
+            effective.unlink(missing_ok=True)
+        raise
+
+
+def config_set(key: str, value: str, *, config_path: str | Path | None = None) -> Path:
+    """Set a dotted ``key`` to ``value`` in the effective config and validate.
+
+    Booleans/ints/lists are parsed from the raw string per key. ``output.dir PATH``
+    also sets ``output.target: folder``; ``output.drive true`` sets
+    ``output.target: drive``; ``output.drive false`` requires an existing
+    ``output.dir`` (else an error tells the operator to set it first). The resulting
+    full config is validated and the file is left unchanged if validation fails.
+    """
+    effective, data = _load_effective_yaml_dict(config_path)
+    parts = _split_key(key)
+
+    if parts == ["output", "drive"]:
+        as_drive = _parse_bool(value, default=False)
+        output = data.setdefault("output", {})
+        if not isinstance(output, dict):
+            output = {}
+            data["output"] = output
+        if as_drive:
+            output["target"] = "drive"
+        else:
+            if not _yaml_str(output.get("dir")):
+                raise ValueError(
+                    "output.drive false needs a local folder; run "
+                    "`config set output.dir PATH` first."
+                )
+            output["target"] = "folder"
+    else:
+        parsed = _parse_set_value(parts, value)
+        _set_nested(data, parts, parsed)
+        if parts == ["output", "dir"]:
+            output = data.setdefault("output", {})
+            if isinstance(output, dict):
+                output["target"] = "folder"
+
+    _atomic_write_validated(effective, data, config_path=config_path)
+    return effective
+
+
+def config_unset(key: str, *, config_path: str | Path | None = None) -> Path:
+    """Remove a dotted ``key`` from the effective config and validate the result."""
+    effective, data = _load_effective_yaml_dict(config_path)
+    parts = _split_key(key)
+    if not _unset_nested(data, parts):
+        raise ValueError(f"config key {key!r} is not set")
+    _atomic_write_validated(effective, data, config_path=config_path)
+    return effective

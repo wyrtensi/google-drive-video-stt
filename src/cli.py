@@ -14,6 +14,9 @@ from src import main as main_module
 from src import relabel_transcript
 from src.config import (
     CONFIG_PATH_ENV_VAR,
+    config_get,
+    config_set,
+    config_unset,
     init_config,
     link_config,
     load_config,
@@ -294,6 +297,33 @@ def cmd_config_link(args: argparse.Namespace) -> None:
         logger.error("%s", exc)
         raise SystemExit(1) from exc
     print(f"Linked configuration to {path}")
+
+
+def cmd_config_get(args: argparse.Namespace) -> None:
+    try:
+        output = config_get(args.key)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc
+    print(output)
+
+
+def cmd_config_set(args: argparse.Namespace) -> None:
+    try:
+        path = config_set(args.key, args.value)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc
+    print(f"Set {args.key} in {path}")
+
+
+def cmd_config_unset(args: argparse.Namespace) -> None:
+    try:
+        path = config_unset(args.key)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc
+    print(f"Unset {args.key} in {path}")
 
 
 def cmd_speakers_set(args: argparse.Namespace) -> None:
@@ -596,6 +626,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Overwrite an existing DIR/config.yml",
     )
     p_config_link.set_defaults(func=cmd_config_link)
+
+    p_config_get = config_sub.add_parser(
+        "get",
+        help="Print the effective config (secrets masked) or one dotted KEY value",
+    )
+    p_config_get.add_argument(
+        "key",
+        nargs="?",
+        default=None,
+        metavar="KEY",
+        help="Dotted key (e.g. openai.model); omit to print the whole masked config",
+    )
+    p_config_get.set_defaults(func=cmd_config_get)
+
+    p_config_set = config_sub.add_parser(
+        "set",
+        help="Set a dotted KEY to VALUE in the effective config and validate it",
+    )
+    p_config_set.add_argument("key", metavar="KEY", help="Dotted key (e.g. openai.api_key)")
+    p_config_set.add_argument("value", metavar="VALUE", help="New value for the key")
+    p_config_set.set_defaults(func=cmd_config_set)
+
+    p_config_unset = config_sub.add_parser(
+        "unset",
+        help="Remove an optional dotted KEY from the effective config",
+    )
+    p_config_unset.add_argument("key", metavar="KEY", help="Dotted key to remove")
+    p_config_unset.set_defaults(func=cmd_config_unset)
 
     p_speakers = sub.add_parser(
         "speakers",

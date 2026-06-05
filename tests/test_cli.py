@@ -996,3 +996,68 @@ def test_config_link_command_reports_error(mocker, tmp_path):
         cli.main(["config", "link", str(tmp_path / "linked")])
 
     assert excinfo.value.code == 1
+
+
+def test_config_get_command_dispatch(mocker, capsys):
+    get = mocker.patch("src.cli.config_get", return_value="model: gpt")
+
+    cli.main(["config", "get"])
+
+    get.assert_called_once_with(None)
+    assert "model: gpt" in capsys.readouterr().out
+
+
+def test_config_get_command_passes_key(mocker, capsys):
+    get = mocker.patch("src.cli.config_get", return_value="gpt-5.4")
+
+    cli.main(["config", "get", "openai.model"])
+
+    get.assert_called_once_with("openai.model")
+    assert "gpt-5.4" in capsys.readouterr().out
+
+
+def test_config_get_command_reports_error(mocker):
+    mocker.patch("src.cli.config_get", side_effect=ValueError("not set"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["config", "get", "nope"])
+
+    assert excinfo.value.code == 1
+
+
+def test_config_set_command_dispatch(mocker, capsys, tmp_path):
+    config_file = tmp_path / "config.yml"
+    setter = mocker.patch("src.cli.config_set", return_value=config_file)
+
+    cli.main(["config", "set", "openai.model", "gpt-5.4"])
+
+    setter.assert_called_once_with("openai.model", "gpt-5.4")
+    assert "Set openai.model" in capsys.readouterr().out
+
+
+def test_config_set_command_reports_error(mocker):
+    mocker.patch("src.cli.config_set", side_effect=ValueError("bad"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["config", "set", "output.target", "s3"])
+
+    assert excinfo.value.code == 1
+
+
+def test_config_unset_command_dispatch(mocker, capsys, tmp_path):
+    config_file = tmp_path / "config.yml"
+    unset = mocker.patch("src.cli.config_unset", return_value=config_file)
+
+    cli.main(["config", "unset", "proxy_url"])
+
+    unset.assert_called_once_with("proxy_url")
+    assert "Unset proxy_url" in capsys.readouterr().out
+
+
+def test_config_unset_command_reports_error(mocker):
+    mocker.patch("src.cli.config_unset", side_effect=ValueError("not set"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["config", "unset", "nope"])
+
+    assert excinfo.value.code == 1
