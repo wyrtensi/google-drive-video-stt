@@ -1,12 +1,18 @@
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import yaml
 
-from src.presets import BUILTIN_PRESETS, Preset, merge_presets, validate_dag
+from src.presets import (
+    BUILTIN_PRESETS,
+    Preset,
+    load_packaged_prompt,
+    merge_presets,
+    validate_dag,
+)
 
 try:
     from dotenv import load_dotenv
@@ -61,11 +67,57 @@ def _parse_folder_ids(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-def _resolve_presets(config_presets: dict | None) -> tuple[Preset, ...]:
-    """Merge config presets over built-ins, validate the DAG, and freeze the result."""
+def _resolve_prompt_text(preset: Preset, config_file: Path | None) -> str:
+    """Resolve a preset's final prompt text from instructions or prompt_file.
+
+    Resolution priority: inline ``instructions`` win; otherwise ``prompt_file`` is
+    resolved to text in this order — the path as written if readable on this OS,
+    then ``<config_dir>/<prompt_file>`` relative to the config file's parent (when a
+    config file exists), then the packaged asset by base name. A ``prompt_file``
+    that resolves but is missing/unreadable/empty raises ``ValueError``; a preset
+    with neither instructions nor prompt_file also raises.
+    """
+    if preset.instructions.strip():
+        return preset.instructions
+    if not preset.prompt_file:
+        raise ValueError(
+            f"preset {preset.name!r} must define instructions or prompt_file"
+        )
+
+    candidates: list[Path] = [Path(preset.prompt_file)]
+    if config_file is not None:
+        candidates.append(config_file.parent / preset.prompt_file)
+    for candidate in candidates:
+        if candidate.is_file():
+            text = candidate.read_text(encoding="utf-8-sig")
+            if not text.strip():
+                raise ValueError(
+                    f"preset {preset.name!r} prompt_file {preset.prompt_file!r} "
+                    f"is empty: {candidate}"
+                )
+            return text
+
+    try:
+        return load_packaged_prompt(os.path.basename(preset.prompt_file))
+    except ValueError as exc:
+        raise ValueError(
+            f"preset {preset.name!r} prompt_file {preset.prompt_file!r} "
+            f"could not be resolved: {exc}"
+        ) from exc
+
+
+def _resolve_presets(
+    config_presets: dict | None,
+    config_file: Path | None = None,
+) -> tuple[Preset, ...]:
+    """Merge config presets over built-ins, resolve prompts, validate, and freeze."""
     merged = merge_presets(BUILTIN_PRESETS, config_presets)
-    validate_dag(merged)
-    return tuple(merged.values())
+    resolved = {
+        name: replace(preset, instructions=_resolve_prompt_text(preset, config_file))
+        for name, preset in merged.items()
+    }
+    validate_dag(resolved)
+    return tuple(resolved.values())
 
 
 def _dotenv_path() -> Path:
@@ -302,7 +354,7 @@ def _config_from_env(*, validate_providers: bool = True) -> Config:
     )
     # Env config has no presets map; the built-in keypoints pass is gated by the
     # legacy OPENAI_KEYPOINTS flag so the migrated YAML stays behavior-compatible.
-    presets = _resolve_presets({"keypoints": {"enabled": openai_keypoints}})
+    presets = _resolve_presets({"keypoints": {"enabled": openai_keypoints}}, None)
 
     output_target = (
         os.environ.get("OUTPUT_TARGET", "drive").strip().lower() or "drive"
@@ -496,7 +548,7 @@ def _config_from_yaml(
     openai_keypoints = _yaml_bool(openai.get("keypoints"), default=False)
     openai_batch = _yaml_bool(openai.get("batch"), default=False)
     openai_max_parallel = _parse_max_parallel(openai.get("max_parallel"), default=4)
-    presets = _resolve_presets(config_presets)
+    presets = _resolve_presets(config_presets, config_file)
 
     deepgram_api_key = ""
     deepgram_model = _yaml_str(deepgram.get("model"), "nova-3") or "nova-3"

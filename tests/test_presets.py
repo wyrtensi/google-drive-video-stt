@@ -7,6 +7,7 @@ from src.presets import (
     INSTRUCTIONS,
     Preset,
     default_artifact_suffix,
+    load_packaged_prompt,
     merge_presets,
     validate_dag,
 )
@@ -44,6 +45,31 @@ def test_builtin_keypoints_present():
     assert by_name["keypoints"].instructions == INSTRUCTIONS
     assert by_name["keypoints"].artifact_suffix == ".keypoints.md"
     assert by_name["keypoints"].enabled is True
+    assert by_name["keypoints"].prompt_file == "keypoints.md"
+
+
+# --- packaged prompt assets -------------------------------------------------
+
+
+def test_load_packaged_prompt_returns_keypoints_text():
+    text = load_packaged_prompt("keypoints.md")
+    assert "## Задачи" in text
+    assert "## Тезисы" in text
+    assert "## Открытые вопросы" in text
+
+
+def test_instructions_equals_keypoints_asset_text():
+    assert INSTRUCTIONS == load_packaged_prompt("keypoints.md")
+
+
+def test_load_packaged_prompt_missing_raises():
+    with pytest.raises(ValueError, match="missing or empty"):
+        load_packaged_prompt("does-not-exist.md")
+
+
+def test_preset_accepts_prompt_file_field():
+    preset = Preset(name="kp", instructions="x", prompt_file="kp.md")
+    assert preset.prompt_file == "kp.md"
 
 
 # --- merge ------------------------------------------------------------------
@@ -80,9 +106,30 @@ def test_merge_adds_new_preset():
     assert new.artifact_suffix == ".expertizeme-managers.md"
 
 
-def test_merge_new_preset_requires_instructions():
+def test_merge_new_preset_requires_instructions_or_prompt_file():
     with pytest.raises(ValueError, match="must define instructions"):
         merge_presets(BUILTIN_PRESETS, {"orphan": {"depends_on": ["keypoints"]}})
+
+
+def test_merge_new_preset_accepts_prompt_file_without_instructions():
+    merged = merge_presets(
+        BUILTIN_PRESETS,
+        {"managers": {"prompt_file": "managers.md"}},
+    )
+    new = merged["managers"]
+    assert new.prompt_file == "managers.md"
+    # prompt_file presets carry no inline instructions; config.py resolves them.
+    assert new.instructions == ""
+
+
+def test_merge_new_preset_keeps_instructions_over_prompt_file():
+    merged = merge_presets(
+        BUILTIN_PRESETS,
+        {"managers": {"instructions": "inline", "prompt_file": "managers.md"}},
+    )
+    new = merged["managers"]
+    assert new.instructions == "inline"
+    assert new.prompt_file == "managers.md"
 
 
 def test_merge_disables_builtin():

@@ -11,35 +11,52 @@ built-in registry, the merge, and DAG validation; ``config.py`` wires them in an
 
 from __future__ import annotations
 
+import importlib.resources as resources
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 
-# LLM keypoints pipeline modeled on the `keypoints-transcription` skill: take a
-# speaker-named transcript of a recorded conversation and produce a concise
-# Keypoints summary (Задачи / Тезисы / Открытые вопросы) grounded strictly in the
-# transcript, in plain Markdown without vault-style wikilinks. This is the single
-# source of truth for the built-in `keypoints` preset; openai_pipeline imports it.
-INSTRUCTIONS = (
-    "You are a meeting analyst. You receive a speaker-named transcript of a "
-    "recorded conversation and produce a concise Keypoints summary in Markdown, "
-    "written in the transcript's own language.\n"
-    "Return ONLY the Keypoints document with exactly these three sections, in this "
-    "order and with these exact headings:\n"
-    "## Задачи\n"
-    "Group action items under a `### <Ответственный>` subheading per assignee, "
-    "using the speaker's real name from the transcript; use `### Без "
-    "ответственного` when the owner is unclear. List each task as `- [ ] <task>` "
-    "and do not repeat the assignee name inside the task line.\n"
-    "## Тезисы\n"
-    "Key points and decisions, each as a `- ` bullet.\n"
-    "## Открытые вопросы\n"
-    "Unresolved questions, each as a `- ` bullet.\n"
-    "Rules: base every item strictly on the transcript - never invent facts, "
-    "tasks, or decisions. Omit a section's bullets only when the transcript truly "
-    "has none, but always keep the three headings. Plain text only: no wikilinks "
-    "(`[[...]]`), no em dashes (use `-`), no guillemets (use straight quotes). No "
-    "preamble, no explanation, no marketing."
-)
+# Packaged prompt assets live under ``assets/prompts/`` in the source checkout and
+# are shipped into ``src/assets/prompts/`` in the built wheel (see pyproject.toml
+# ``force-include``). ``load_packaged_prompt`` resolves a prompt by file name from
+# whichever of those two locations exists, so the same code path works editable and
+# installed.
+_PACKAGED_PROMPTS_PACKAGE = "src.assets.prompts"
+_REPO_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "prompts"
+
+
+def load_packaged_prompt(name: str) -> str:
+    """Return the text of a packaged prompt asset by file name (e.g. ``keypoints.md``).
+
+    Tries the installed-wheel location (``src/assets/prompts`` via
+    ``importlib.resources``) first, then falls back to the repo's
+    ``assets/prompts`` directory for editable/source checkouts. Raises
+    ``ValueError`` if the asset cannot be found or is empty.
+    """
+    try:
+        resource = resources.files(_PACKAGED_PROMPTS_PACKAGE).joinpath(name)
+        if resource.is_file():
+            text = resource.read_text(encoding="utf-8")
+            if text.strip():
+                return text
+    except (ModuleNotFoundError, FileNotFoundError, OSError):
+        pass
+
+    repo_path = _REPO_PROMPTS_DIR / name
+    if repo_path.is_file():
+        text = repo_path.read_text(encoding="utf-8")
+        if text.strip():
+            return text
+
+    raise ValueError(f"packaged prompt asset {name!r} is missing or empty")
+
+
+# Built-in `keypoints` preset prompt: take a speaker-named transcript of a
+# recorded conversation and produce a concise Keypoints summary
+# (Задачи / Тезисы / Открытые вопросы) grounded strictly in the transcript, in
+# plain Markdown without vault-style wikilinks. The text is owned by the packaged
+# asset ``assets/prompts/keypoints.md``; ``openai_pipeline`` imports this str.
+INSTRUCTIONS = load_packaged_prompt("keypoints.md")
 
 
 def default_artifact_suffix(name: str) -> str:
@@ -62,6 +79,7 @@ class Preset:
     batch: bool | None = None
     artifact_suffix: str = ""
     enabled: bool = True
+    prompt_file: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -78,6 +96,7 @@ BUILTIN_PRESETS: tuple[Preset, ...] = (
         name="keypoints",
         instructions=INSTRUCTIONS,
         artifact_suffix=".keypoints.md",
+        prompt_file="keypoints.md",
     ),
 )
 
@@ -127,9 +146,14 @@ def _build_preset(name: str, raw: Mapping, base: Preset | None) -> Preset:
     """Create a Preset from raw config fields, overriding ``base`` when present."""
     if base is None:
         instructions = _as_str(raw.get("instructions"))
-        if not instructions.strip():
+        prompt_file = _opt_str(raw.get("prompt_file"))
+        # Resolution priority is instructions > prompt_file > error: a preset may
+        # carry its prompt inline or point at a prompt file (resolved to text in
+        # config.py), but providing neither is a config error.
+        if not instructions.strip() and prompt_file is None:
             raise ValueError(
-                f"preset {name!r} is not a built-in and must define instructions"
+                f"preset {name!r} is not a built-in and must define instructions "
+                f"or prompt_file"
             )
         suffix = _as_str(raw.get("artifact_suffix")).strip()
         return Preset(
@@ -140,11 +164,14 @@ def _build_preset(name: str, raw: Mapping, base: Preset | None) -> Preset:
             batch=_opt_bool(raw.get("batch")),
             artifact_suffix=suffix or default_artifact_suffix(name),
             enabled=_bool(raw.get("enabled"), default=True),
+            prompt_file=prompt_file,
         )
 
     overrides: dict[str, object] = {}
     if "instructions" in raw:
         overrides["instructions"] = _as_str(raw.get("instructions"))
+    if "prompt_file" in raw:
+        overrides["prompt_file"] = _opt_str(raw.get("prompt_file"))
     if "depends_on" in raw:
         overrides["depends_on"] = _depends_on(raw.get("depends_on"))
     if "model" in raw:

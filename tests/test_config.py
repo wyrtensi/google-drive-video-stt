@@ -868,6 +868,108 @@ def test_yaml_presets_invalid_dag_raises(tmp_path):
         load_config(config_path=config_file, validate_providers=False)
 
 
+def test_yaml_preset_prompt_file_resolves_relative_to_config(tmp_path):
+    config_file = tmp_path / "config.yml"
+    (tmp_path / "managers.md").write_text("manager prompt body", encoding="utf-8")
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {"managers": {"prompt_file": "managers.md"}},
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    by_name = {p.name: p for p in cfg.presets}
+    assert by_name["managers"].instructions == "manager prompt body"
+    assert by_name["managers"].prompt_file == "managers.md"
+
+
+def test_yaml_preset_prompt_file_absolute_path(tmp_path):
+    config_file = tmp_path / "config.yml"
+    prompt = tmp_path / "elsewhere" / "p.md"
+    prompt.parent.mkdir()
+    prompt.write_text("absolute prompt", encoding="utf-8")
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {"abs": {"prompt_file": str(prompt)}},
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    by_name = {p.name: p for p in cfg.presets}
+    assert by_name["abs"].instructions == "absolute prompt"
+
+
+def test_yaml_preset_prompt_file_falls_back_to_packaged_asset(tmp_path):
+    config_file = tmp_path / "config.yml"
+    # The file exists only as a packaged asset, not next to the config.
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {"extra": {"prompt_file": "keypoints.md"}},
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    by_name = {p.name: p for p in cfg.presets}
+    assert "## Задачи" in by_name["extra"].instructions
+
+
+def test_yaml_preset_instructions_win_over_prompt_file(tmp_path):
+    config_file = tmp_path / "config.yml"
+    (tmp_path / "managers.md").write_text("from file", encoding="utf-8")
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {
+                "managers": {"instructions": "inline wins", "prompt_file": "managers.md"}
+            },
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    by_name = {p.name: p for p in cfg.presets}
+    assert by_name["managers"].instructions == "inline wins"
+
+
+def test_yaml_preset_empty_prompt_file_raises(tmp_path):
+    config_file = tmp_path / "config.yml"
+    (tmp_path / "blank.md").write_text("   \n", encoding="utf-8")
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {"blank": {"prompt_file": "blank.md"}},
+        },
+    )
+
+    with pytest.raises(ValueError, match="empty"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+def test_yaml_preset_missing_prompt_file_raises(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {"gone": {"prompt_file": "no-such-prompt.md"}},
+        },
+    )
+
+    with pytest.raises(ValueError, match="could not be resolved"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
 def test_env_migration_seeds_keypoints_preset(monkeypatch, tmp_path):
     monkeypatch.setenv("FOLDER_IDS", "f1")
     monkeypatch.setenv("STT_PROVIDER", "disabled")

@@ -33,6 +33,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"assets/prompts" = "src/assets/prompts"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "assets/prompts", "README.md", "LICENSE"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
