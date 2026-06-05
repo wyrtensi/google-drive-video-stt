@@ -970,6 +970,99 @@ def test_yaml_preset_missing_prompt_file_raises(tmp_path):
         load_config(config_path=config_file, validate_providers=False)
 
 
+# --- strict YAML validation -------------------------------------------------
+
+
+def test_yaml_rejects_duplicate_top_level_key(tmp_path):
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
+        "stt:\n  provider: disabled\nbitrate: 96k\nbitrate: 128k\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate key"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+def test_yaml_rejects_duplicate_preset_key(tmp_path):
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
+        "stt:\n"
+        "  provider: disabled\n"
+        "presets:\n"
+        "  managers:\n"
+        "    instructions: first\n"
+        "  managers:\n"
+        "    instructions: second\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate key"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+def test_yaml_rejects_duplicate_artifact_suffix_among_enabled(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {
+                "first": {"instructions": "a", "artifact_suffix": ".shared.md"},
+                "second": {"instructions": "b", "artifact_suffix": ".shared.md"},
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="artifact_suffix"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+def test_yaml_duplicate_artifact_suffix_ignored_when_disabled(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {
+                "first": {"instructions": "a", "artifact_suffix": ".shared.md"},
+                "second": {
+                    "instructions": "b",
+                    "artifact_suffix": ".shared.md",
+                    "enabled": False,
+                },
+            },
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    assert {p.name for p in cfg.presets} == {"keypoints", "first"}
+
+
+def test_yaml_shared_prompt_file_distinct_names_and_suffixes_allowed(tmp_path):
+    config_file = tmp_path / "config.yml"
+    (tmp_path / "shared.md").write_text("shared prompt body", encoding="utf-8")
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {
+                "first": {"prompt_file": "shared.md", "artifact_suffix": ".one.md"},
+                "second": {"prompt_file": "shared.md", "artifact_suffix": ".two.md"},
+            },
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    by_name = {p.name: p for p in cfg.presets}
+    assert by_name["first"].instructions == "shared prompt body"
+    assert by_name["second"].instructions == "shared prompt body"
+    assert by_name["first"].artifact_suffix == ".one.md"
+    assert by_name["second"].artifact_suffix == ".two.md"
+
+
 def test_env_migration_seeds_keypoints_preset(monkeypatch, tmp_path):
     monkeypatch.setenv("FOLDER_IDS", "f1")
     monkeypatch.setenv("STT_PROVIDER", "disabled")

@@ -63,6 +63,34 @@ class Config:
     presets: tuple[Preset, ...] = ()
 
 
+class UniqueKeyLoader(yaml.SafeLoader):
+    """A ``SafeLoader`` that rejects duplicate keys in any YAML mapping.
+
+    PyYAML's default loader silently keeps the last value when a mapping repeats a
+    key, which would let ``config.yml`` hide a second preset under the same name (or
+    a second top-level key) without warning. This loader raises a ``ValueError`` the
+    moment a duplicate key is constructed, covering nested maps such as two presets
+    sharing a name under ``presets:``.
+    """
+
+    def construct_mapping(self, node, deep=False):  # type: ignore[override]
+        mapping: dict = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in mapping:
+                raise ValueError(
+                    f"duplicate key {key!r} in {CONFIG_FILE_NAME} mapping "
+                    f"(line {key_node.start_mark.line + 1})"
+                )
+            mapping[key] = self.construct_object(value_node, deep=deep)
+        return mapping
+
+
+def _parse_config_yaml(text: str) -> object:
+    """Parse config YAML text, rejecting duplicate mapping keys at parse time."""
+    return yaml.load(text, Loader=UniqueKeyLoader)
+
+
 def _parse_folder_ids(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
@@ -117,7 +145,27 @@ def _resolve_presets(
         for name, preset in merged.items()
     }
     validate_dag(resolved)
+    _validate_unique_artifact_suffixes(resolved.values())
     return tuple(resolved.values())
+
+
+def _validate_unique_artifact_suffixes(presets: object) -> None:
+    """Reject two enabled presets that would write the same sibling artifact.
+
+    Presets may share a ``prompt_file`` but must differ in ``name`` (already enforced
+    by the mapping) and in ``artifact_suffix`` so their outputs don't collide on
+    disk. ``merge_presets`` returns only enabled presets, so every preset passed here
+    is enabled.
+    """
+    seen: dict[str, str] = {}
+    for preset in presets:
+        owner = seen.get(preset.artifact_suffix)
+        if owner is not None:
+            raise ValueError(
+                f"presets {owner!r} and {preset.name!r} both use artifact_suffix "
+                f"{preset.artifact_suffix!r}; enabled presets must use distinct suffixes"
+            )
+        seen[preset.artifact_suffix] = preset.name
 
 
 def _dotenv_path() -> Path:
@@ -744,7 +792,7 @@ def load_config(
     resolved = _resolve_config_file_path(config_path)
     text = _read_config_text(resolved) if resolved.exists() else ""
     if text.strip():
-        raw = yaml.safe_load(text)
+        raw = _parse_config_yaml(text)
         if not isinstance(raw, dict):
             raise ValueError(
                 f"{resolved} must contain a YAML mapping, got: {type(raw).__name__}"
