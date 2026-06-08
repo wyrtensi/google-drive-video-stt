@@ -81,7 +81,7 @@ Verified problems:
 **Files:**
 - Modify: `scripts/docker-smoke.sh`.
 
-- [ ] Capture both stdout and stderr from the in-container `gdstt doctor`
+- [x] Capture both stdout and stderr from the in-container `gdstt doctor`
       (`output="$(docker run ... 2>&1)"`) and `echo "$output"` BEFORE the
       `config:` path assertion, so a failing run shows the container's output for
       debugging. Keep `set -euo pipefail` and the existing pass/fail semantics
@@ -89,7 +89,7 @@ Verified problems:
       packaged prompt is unreachable). This task is a shell-script change; verify by
       `bash -n scripts/docker-smoke.sh` (syntax) and a manual read - it needs no
       pytest, but still run the suite to confirm nothing else regressed.
-- [ ] Run `uv run pytest` and `uv run ruff check` - must pass.
+- [x] Run `uv run pytest` and `uv run ruff check` - must pass.
 
 ## Verification
 

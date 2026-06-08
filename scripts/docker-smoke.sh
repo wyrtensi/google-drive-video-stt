@@ -35,8 +35,16 @@ else
 fi
 
 echo "==> Running gdstt doctor in the container"
-output="$(docker run --rm -v "$PWD/data:/app/data" "${ENV_ARGS[@]}" "$IMAGE" gdstt doctor)"
+# Capture stdout AND stderr so a failing run is debuggable. `set -e` would abort
+# on a non-zero `doctor` exit before we echo the captured output, so guard the
+# assignment with `|| doctor_status=$?` and echo unconditionally below.
+doctor_status=0
+output="$(docker run --rm -v "$PWD/data:/app/data" "${ENV_ARGS[@]}" "$IMAGE" gdstt doctor 2>&1)" || doctor_status=$?
 echo "$output"
+if [[ "$doctor_status" -ne 0 ]]; then
+  echo "FAIL: gdstt doctor exited with status $doctor_status (output above)" >&2
+  exit "$doctor_status"
+fi
 
 echo "==> Verifying config path is under /app/data"
 config_line="$(printf '%s\n' "$output" | grep '^config:' || true)"
