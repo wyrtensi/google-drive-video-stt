@@ -16,13 +16,14 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-# Packaged prompt assets live under ``assets/prompts/`` in the source checkout and
-# are shipped into ``src/assets/prompts/`` in the built wheel (see pyproject.toml
-# ``force-include``). ``load_packaged_prompt`` resolves a prompt by file name from
-# whichever of those two locations exists, so the same code path works editable and
-# installed.
+# Packaged prompt assets ship as real package data under ``src/assets/prompts/`` so
+# ``importlib.resources`` resolves them identically in editable, wheel, and
+# ``uv tool install`` layouts (and the Dockerfile's ``COPY src ./src`` ships them
+# automatically). ``load_packaged_prompt`` reads a prompt by file name from that
+# package, with a single ``Path(__file__)``-relative fallback for odd source runs
+# where ``importlib.resources`` can't see the package data.
 _PACKAGED_PROMPTS_PACKAGE = "src.assets.prompts"
-_REPO_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "prompts"
+_SRC_PROMPTS_DIR = Path(__file__).resolve().parent / "assets" / "prompts"
 
 # Prompt assets shipped with the package. ``config init``/``config link`` and
 # auto-migration copy these beside a generated config so the default chain
@@ -38,9 +39,10 @@ PACKAGED_PROMPT_ASSETS: tuple[str, ...] = (
 def load_packaged_prompt(name: str) -> str:
     """Return the text of a packaged prompt asset by file name (e.g. ``keypoints.md``).
 
-    Tries the installed-wheel location (``src/assets/prompts`` via
-    ``importlib.resources``) first, then falls back to the repo's
-    ``assets/prompts`` directory for editable/source checkouts. Raises
+    Reads the asset from the ``src.assets.prompts`` package via
+    ``importlib.resources`` (works editable, wheel, and ``uv tool install``), with a
+    single ``Path(__file__)``-relative fallback to ``src/assets/prompts`` for source
+    runs where ``importlib.resources`` can't see the package data. Raises
     ``ValueError`` if the asset cannot be found or is empty.
     """
     try:
@@ -52,9 +54,9 @@ def load_packaged_prompt(name: str) -> str:
     except (ModuleNotFoundError, FileNotFoundError, OSError):
         pass
 
-    repo_path = _REPO_PROMPTS_DIR / name
-    if repo_path.is_file():
-        text = repo_path.read_text(encoding="utf-8")
+    src_path = _SRC_PROMPTS_DIR / name
+    if src_path.is_file():
+        text = src_path.read_text(encoding="utf-8")
         if text.strip():
             return text
 
@@ -65,7 +67,7 @@ def load_packaged_prompt(name: str) -> str:
 # recorded conversation and produce a concise Keypoints summary
 # (Задачи / Тезисы / Открытые вопросы) grounded strictly in the transcript, in
 # plain Markdown without vault-style wikilinks. The text is owned by the packaged
-# asset ``assets/prompts/keypoints.md``; ``openai_pipeline`` imports this str.
+# asset ``src/assets/prompts/keypoints.md``; ``openai_pipeline`` imports this str.
 INSTRUCTIONS = load_packaged_prompt("keypoints.md")
 
 

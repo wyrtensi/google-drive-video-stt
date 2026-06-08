@@ -32,12 +32,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"assets/prompts" = "src/assets/prompts"
+# Prompt assets are package data under ``src/assets/prompts/``; ship the ``.md``
+# files alongside the Python sources in the wheel.
+artifacts = ["src/assets/prompts/*.md"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "assets/prompts", "README.md", "LICENSE"]
+include = ["src", "README.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

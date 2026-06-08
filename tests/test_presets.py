@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from src import presets as presets_module
 from src.presets import (
     BUILTIN_PRESETS,
     INSTRUCTIONS,
@@ -65,6 +68,29 @@ def test_instructions_equals_keypoints_asset_text():
 def test_load_packaged_prompt_missing_raises():
     with pytest.raises(ValueError, match="missing or empty"):
         load_packaged_prompt("does-not-exist.md")
+
+
+def test_load_packaged_prompt_uses_importlib_resources_without_source_dir(monkeypatch):
+    # Simulate an installed/container layout where the source-dir fallback is absent
+    # (no top-level ``assets/`` and no ``src/assets/prompts`` on disk). The prompt must
+    # still resolve via ``importlib.resources`` package data alone.
+    monkeypatch.setattr(
+        presets_module, "_SRC_PROMPTS_DIR", Path("/nonexistent/assets/prompts")
+    )
+    text = load_packaged_prompt("keypoints.md")
+    assert "## Задачи" in text
+    assert text.strip()
+
+
+def test_load_packaged_prompt_falls_back_to_source_dir(monkeypatch):
+    # Force the ``importlib.resources`` lookup to fail so the ``Path``-relative
+    # source-dir fallback is exercised and still finds the shipped package data.
+    monkeypatch.setattr(
+        presets_module, "_PACKAGED_PROMPTS_PACKAGE", "src.assets.does_not_exist"
+    )
+    text = load_packaged_prompt("keypoints.md")
+    assert "## Задачи" in text
+    assert text.strip()
 
 
 def test_preset_accepts_prompt_file_field():

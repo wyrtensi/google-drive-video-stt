@@ -88,33 +88,38 @@ Decisions for this plan:
 - Modify: `src/presets.py`, `src/config.py`, `pyproject.toml`,
   `tests/test_presets.py`, `tests/test_config.py`.
 
-- [ ] `git mv` the three prompt `.md` files from `assets/prompts/` into
+- [x] `git mv` the three prompt `.md` files from `assets/prompts/` into
       `src/assets/prompts/`, and add empty `__init__.py` to `src/assets/` and
       `src/assets/prompts/` so `src.assets.prompts` is an importable package.
-- [ ] In `src/presets.py`, simplify `load_packaged_prompt` to read from
+- [x] In `src/presets.py`, simplify `load_packaged_prompt` to read from
       `importlib.resources.files("src.assets.prompts")` (now a real package). Keep a
       single defensive fallback to a `Path(__file__)`-relative
       `src/assets/prompts` dir for source runs, and drop the old top-level
       `assets/prompts` repo fallback. Update `_PACKAGED_PROMPTS_PACKAGE` /
       `_REPO_PROMPTS_DIR` accordingly. `INSTRUCTIONS` and `PACKAGED_PROMPT_ASSETS`
-      must keep resolving to the same text.
-- [ ] In `pyproject.toml`, remove the
+      must keep resolving to the same text. (Renamed `_REPO_PROMPTS_DIR` ->
+      `_SRC_PROMPTS_DIR`, now `Path(__file__).parent / "assets" / "prompts"`.)
+- [x] In `pyproject.toml`, remove the
       `[tool.hatch.build.targets.wheel.force-include]` mapping (no longer needed)
       and update the sdist `include` to drop `assets/prompts`. Ensure the wheel
       ships `src/assets/prompts/*.md` (hatchling includes package files under
       `src`); if needed add an explicit `artifacts`/`include` entry for `*.md`.
-- [ ] Update `src/config.py::copy_prompt_assets` (and anything else reading the old
+      (Added `artifacts = ["src/assets/prompts/*.md"]` to the wheel target.)
+- [x] Update `src/config.py::copy_prompt_assets` (and anything else reading the old
       `assets/prompts` location) to source the packaged prompts from the new
       package location via `load_packaged_prompt` / `importlib.resources`.
-- [ ] Add/adjust tests: `tests/test_presets.py` asserts `load_packaged_prompt(
+      (No change needed: `copy_prompt_assets` already sources via `load_packaged_prompt`.)
+- [x] Add/adjust tests: `tests/test_presets.py` asserts `load_packaged_prompt(
       'keypoints.md')` works WITHOUT any top-level `assets/` directory present
       (simulating an installed/container layout, e.g. monkeypatch the source-dir
       fallback to a nonexistent path) and that `importlib.resources` is the path
       that succeeds; keep the `INSTRUCTIONS == keypoints.md` assertion.
-- [ ] Verify the built wheel includes the assets: `uv build --wheel` then confirm
+- [x] Verify the built wheel includes the assets: `uv build --wheel` then confirm
       `src/assets/prompts/{keypoints,transcript-cleanup,action-items}.md` are inside
-      the wheel; note the result in the task.
-- [ ] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+      the wheel; note the result in the task. (Confirmed: all three `.md` files plus
+      `__init__.py` present in the built wheel.)
+- [x] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+      (567 passed, 2 skipped; ruff clean.)
 
 ### Task 2: Persist config and data inside the container volume
 
