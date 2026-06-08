@@ -1238,9 +1238,11 @@ def init_config(
 ) -> Path:
     """Create a fresh full ``config.yml`` from the packaged defaults.
 
-    Target selection: explicit ``config_path`` (or ``GDSTT_CONFIG``) wins; ``local``
-    writes ``./data/config.yml`` in the cwd; otherwise the cross-platform user config
-    path is used. The default preset chain is ``transcript -> keypoints`` with only
+    Target selection: explicit ``config_path`` wins; ``local`` writes
+    ``./data/config.yml`` in the cwd; otherwise the runtime resolver picks the
+    target (``GDSTT_CONFIG`` > ``<DATA_DIR>/config.yml`` when ``DATA_DIR`` is set >
+    the cross-platform user config path) so init writes where the runtime reads.
+    The default preset chain is ``transcript -> keypoints`` with only
     ``keypoints`` enabled. Prompt assets are always copied beside the config: into
     ``prompt_dir`` when given (and the ``prompt_file`` entries point there), else into
     ``<config_dir>/prompts/``. Refuses to overwrite a non-empty existing config unless
@@ -1251,8 +1253,9 @@ def init_config(
     elif local:
         target = _local_config_path()
     else:
-        env_path = os.environ.get(CONFIG_PATH_ENV_VAR, "").strip()
-        target = Path(env_path) if env_path else _user_config_path()
+        # Match the runtime resolver so init writes exactly where the runtime
+        # reads: GDSTT_CONFIG > DATA_DIR/config.yml (when DATA_DIR set) > user path.
+        target = resolve_config_file_path()
 
     if target.exists() and _read_config_text(target).strip() and not force:
         raise ValueError(

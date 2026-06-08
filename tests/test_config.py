@@ -1498,11 +1498,50 @@ def test_init_uses_user_path_without_config(monkeypatch, tmp_path):
     user = tmp_path / "user" / "config.yml"
     monkeypatch.setattr("src.config._user_config_path", lambda: user)
     monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+    monkeypatch.delenv("DATA_DIR", raising=False)
 
     path = init_config()
 
     assert path == user
     assert user.is_file()
+
+
+def test_init_default_target_honors_data_dir(monkeypatch, tmp_path):
+    """With no flags, init writes where the runtime resolver reads.
+
+    Guards the Docker fix: the image bakes DATA_DIR=/app/data, so a bare
+    ``gdstt config init`` must land inside the mounted volume (matching the
+    runtime/``doctor`` read path), not the per-user config path.
+    """
+    user = tmp_path / "user" / "config.yml"
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+    data_dir = tmp_path / "app" / "data"
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+
+    path = init_config()
+
+    # Writes config (and prompts) under DATA_DIR, not the per-user path.
+    assert path == data_dir / CONFIG_FILE_NAME
+    assert path.is_file()
+    assert (data_dir / "prompts" / "keypoints.md").is_file()
+    assert not user.exists()
+
+
+def test_init_data_dir_does_not_override_explicit_targets(monkeypatch, tmp_path):
+    """DATA_DIR awareness applies only to the bare default, not --local/--config."""
+    user = tmp_path / "user" / "config.yml"
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "datadir"))
+
+    # Explicit --config still wins.
+    explicit = tmp_path / "explicit" / "config.yml"
+    assert init_config(config_path=explicit) == explicit
+
+    # --local still targets ./data/config.yml under the cwd.
+    monkeypatch.chdir(tmp_path)
+    assert init_config(local=True) == Path("data") / CONFIG_FILE_NAME
 
 
 def test_init_output_dir_sets_folder_target(tmp_path):

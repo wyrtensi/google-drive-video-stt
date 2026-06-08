@@ -62,19 +62,19 @@ Verified problems:
 **Files:**
 - Modify: `src/config.py`, `tests/test_config.py`.
 
-- [ ] In `src/config.py::init_config`, change the default branch (no `config_path`,
+- [x] In `src/config.py::init_config`, change the default branch (no `config_path`,
       not `local`) so the target matches the runtime resolver: use
       `resolve_config_file_path()` (which already applies
       `GDSTT_CONFIG > DATA_DIR/config.yml when DATA_DIR set > _user_config_path()`)
       instead of `GDSTT_CONFIG or _user_config_path()`. Keep `--config` and
       `--local` behavior unchanged.
-- [ ] Add a test in `tests/test_config.py`: with `DATA_DIR` set (and no
+- [x] Add a test in `tests/test_config.py`: with `DATA_DIR` set (and no
       `--config`/`GDSTT_CONFIG`/`--local`), `init_config()` writes
       `config.yml` (and copies `prompts/`) under `DATA_DIR`, not the user path;
       and without `DATA_DIR` it still writes to the mocked user path. Confirm
       `--local` still targets `./data/config.yml` and an explicit `config_path`
       still wins. Mock `_user_config_path`; do not touch the real home dir.
-- [ ] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+- [x] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
 
 ### Task 2: Make the Docker smoke script print diagnostics on failure
 
