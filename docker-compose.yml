@@ -6,6 +6,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # The image already bakes DATA_DIR=/app/data; set it here too so the
+      # config resolver writes config.yml, credentials.json/token.json, and the
+      # first-run .env->YAML migration into the mounted ./data volume.
+      DATA_DIR: /app/data
     volumes:
       - ./data:/app/data
     logging:

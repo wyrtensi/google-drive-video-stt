@@ -879,6 +879,27 @@ def test_resolve_data_dir_only_honored_when_set(monkeypatch, tmp_path):
     assert resolve_config_file_path() == tmp_path / "dd" / CONFIG_FILE_NAME
 
 
+def test_resolve_container_data_dir(monkeypatch, tmp_path):
+    """Container layout: DATA_DIR=/app/data resolves config into the volume.
+
+    Guards the Docker fix - the image bakes DATA_DIR=/app/data (and compose
+    sets it too) so the bootstrap config lands in the mounted ./data volume.
+    Without DATA_DIR the resolver must fall back to the per-user path, never
+    /app/data, so an ambient container env can't hijack a host install.
+    """
+    user = tmp_path / "user.yml"
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+    monkeypatch.delenv("DATA_DIR", raising=False)
+
+    # No DATA_DIR -> per-user path, not the container volume.
+    assert resolve_config_file_path() == user
+
+    # DATA_DIR=/app/data (the baked container default) -> /app/data/config.yml.
+    monkeypatch.setenv("DATA_DIR", "/app/data")
+    assert resolve_config_file_path() == Path("/app/data") / CONFIG_FILE_NAME
+
+
 def test_resolve_identical_from_different_cwd(monkeypatch, tmp_path):
     user = tmp_path / "user.yml"
     monkeypatch.setattr("src.config._user_config_path", lambda: user)

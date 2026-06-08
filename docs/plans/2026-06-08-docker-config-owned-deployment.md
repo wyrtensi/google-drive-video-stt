@@ -126,21 +126,25 @@ Decisions for this plan:
 **Files:**
 - Modify: `Dockerfile`, `docker-compose.yml`, `tests/test_config.py`.
 
-- [ ] In `Dockerfile`, add `ENV DATA_DIR=/app/data` (alongside the existing `ENV`
+- [x] In `Dockerfile`, add `ENV DATA_DIR=/app/data` (alongside the existing `ENV`
       block) so the resolver uses the mounted volume by default. Confirm the
       `WORKDIR /app` + volume mount `./data:/app/data` then make
       `gdstt`/`python -m src.main` read and write `config.yml`,
-      `credentials.json`/`token.json` under the mount.
-- [ ] In `docker-compose.yml`, document the same `DATA_DIR=/app/data` (either rely
+      `credentials.json`/`token.json` under the mount. (Added `DATA_DIR=/app/data`
+      to the existing `ENV` block.)
+- [x] In `docker-compose.yml`, document the same `DATA_DIR=/app/data` (either rely
       on the image `ENV` or set it explicitly in `environment:`), keeping the
       `./data:/app/data` volume and `env_file: .env` so `.env`->YAML
-      auto-migration lands in the volume on first run.
-- [ ] Add a test in `tests/test_config.py` that, with `DATA_DIR=/app/data` set and
+      auto-migration lands in the volume on first run. (Set `DATA_DIR: /app/data`
+      explicitly in `environment:` with a clarifying comment.)
+- [x] Add a test in `tests/test_config.py` that, with `DATA_DIR=/app/data` set and
       no `--config`/`GDSTT_CONFIG`, `resolve_config_file_path()` returns
       `/app/data/config.yml` (container resolution), and that without `DATA_DIR` it
       returns the user path (guarding against a regression of the mounted-volume
       fix). Mock the environment; do not touch the real filesystem.
-- [ ] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+      (Added `test_resolve_container_data_dir`.)
+- [x] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+      (568 passed, 2 skipped; ruff clean.)
 
 ### Task 3: Container verification and updated Docker docs
 
