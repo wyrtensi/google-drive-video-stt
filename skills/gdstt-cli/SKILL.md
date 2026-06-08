@@ -159,7 +159,7 @@ OAuth client (Desktop app) JSON и записать inline под `google.creden
 `%APPDATA%\gdstt\config.yml`. Рядом в `<config_dir>/prompts/` лежат скопированные
 prompt-ассеты (`keypoints.md`, `transcript-cleanup.md`, `action-items.md`), на
 которые ссылаются `prompt_file` пресетов; их кладут туда `config init`/`link` и
-авто-миграция. Нестандартный файл: `--config PATH` или `GDSTT_CONFIG`.
+авто-миграция. Цель без флагов = как у рантайма: `--config`/`GDSTT_CONFIG` > `<DATA_DIR>/config.yml` (если задан; важно под Docker) > OS-дефолт.
 
 Подкоманды `config`:
 

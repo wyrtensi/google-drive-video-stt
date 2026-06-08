@@ -1528,6 +1528,49 @@ def test_init_default_target_honors_data_dir(monkeypatch, tmp_path):
     assert not user.exists()
 
 
+def test_init_default_target_honors_relative_data_dir(monkeypatch, tmp_path):
+    """A relative DATA_DIR in the bare default anchors to the dotenv parent.
+
+    Guards the resolver path the Docker fix routes ``init`` through: a relative
+    ``DATA_DIR`` must resolve via ``_resolve_relative_to_dotenv`` exactly as the
+    runtime reader does, not against an unrelated cwd.
+    """
+    user = tmp_path / "user" / "config.yml"
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+    # Pin the dotenv anchor inside tmp_path so the relative DATA_DIR is
+    # deterministic regardless of any .env in the checkout.
+    dotenv = tmp_path / "anchor" / ".env"
+    monkeypatch.setattr("src.config._dotenv_path", lambda: dotenv)
+    monkeypatch.setenv("DATA_DIR", "app/data")
+
+    path = init_config()
+
+    assert path == dotenv.parent / "app" / "data" / CONFIG_FILE_NAME
+    assert path.is_file()
+    assert not user.exists()
+
+
+def test_init_default_blank_gdstt_config_falls_back_to_data_dir(monkeypatch, tmp_path):
+    """A whitespace-only GDSTT_CONFIG is treated as unset, so DATA_DIR wins.
+
+    The resolver strips ``GDSTT_CONFIG`` before honoring it; this guards the
+    init default branch against regressing to a raw (non-stripped) read that
+    would target an empty path instead of the volume.
+    """
+    user = tmp_path / "user" / "config.yml"
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    monkeypatch.setenv("GDSTT_CONFIG", "   ")
+    data_dir = tmp_path / "app" / "data"
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+
+    path = init_config()
+
+    assert path == data_dir / CONFIG_FILE_NAME
+    assert path.is_file()
+    assert not user.exists()
+
+
 def test_init_data_dir_does_not_override_explicit_targets(monkeypatch, tmp_path):
     """DATA_DIR awareness applies only to the bare default, not --local/--config."""
     user = tmp_path / "user" / "config.yml"
@@ -1542,6 +1585,45 @@ def test_init_data_dir_does_not_override_explicit_targets(monkeypatch, tmp_path)
     # --local still targets ./data/config.yml under the cwd.
     monkeypatch.chdir(tmp_path)
     assert init_config(local=True) == Path("data") / CONFIG_FILE_NAME
+
+
+def test_init_default_prefers_gdstt_config_over_data_dir(monkeypatch, tmp_path):
+    """In the bare-default branch, GDSTT_CONFIG outranks DATA_DIR and the user path."""
+    user = tmp_path / "user" / "config.yml"
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    env_target = tmp_path / "env" / "config.yml"
+    monkeypatch.setenv("GDSTT_CONFIG", str(env_target))
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "datadir"))
+
+    path = init_config()
+
+    assert path == env_target
+    assert env_target.is_file()
+    assert not user.exists()
+    assert not (tmp_path / "datadir").exists()
+
+
+def test_init_default_does_not_dereference_forwarding_pointer(monkeypatch, tmp_path):
+    """init targets the bootstrap location, never silently following a pointer.
+
+    The bootstrap target (here the per-user path) is a forwarding pointer to a
+    real config. init must treat the pointer file itself as the existing config
+    and refuse to overwrite it without --force - it must NOT dereference the
+    pointer and create the real target behind it.
+    """
+    user = tmp_path / "user" / "config.yml"
+    monkeypatch.setattr("src.config._user_config_path", lambda: user)
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    real_target = tmp_path / "real" / "config.yml"
+    user.parent.mkdir(parents=True, exist_ok=True)
+    user.write_text(f"config_file: {real_target}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="already exists"):
+        init_config()
+
+    # The pointer was not dereferenced: the real target was never created.
+    assert not real_target.exists()
 
 
 def test_init_output_dir_sets_folder_target(tmp_path):

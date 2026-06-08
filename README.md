@@ -61,7 +61,7 @@ one from the packaged defaults (the default `transcript -> keypoints` preset cha
 works out of the box):
 
 ```bash
-gdstt config init      # writes the per-user config.yml + prompts/ next to it
+gdstt config init      # writes config.yml + prompts/ to the resolved target (see below)
 gdstt config path      # print the resolved config.yml path
 ```
 
@@ -525,10 +525,13 @@ only after the single-file or `run-once --dry-run` path already matches expectat
 
 There is always exactly one active `config.yml`; `gdstt config path` prints where
 it is. `config init` creates one from the packaged defaults and copies the prompt
-assets into `<config_dir>/prompts/`; `config get`/`set`/`unset` read (with secrets
-masked) or edit a dotted key (e.g. `openai.model`, `stt.deepgram.api_key`) in
-place, validating the result. The OS-default locations are listed in
-[Setup](#setup).
+assets into `<config_dir>/prompts/`. With no `--config`/`--local`, init resolves its
+target the same way the runtime reads it — `GDSTT_CONFIG` > `<DATA_DIR>/config.yml`
+(when `DATA_DIR` is set) > the OS-default path — so it writes exactly where the
+runtime will look (relevant under Docker, where the image bakes `DATA_DIR=/app/data`).
+`config get`/`set`/`unset` read (with secrets masked) or edit a dotted key (e.g.
+`openai.model`, `stt.deepgram.api_key`) in place, validating the result. The
+OS-default locations are listed in [Setup](#setup).
 
 `config link DIR` moves the effective full config into `DIR/config.yml` and leaves
 a forwarding pointer (`config_file: <DIR/config.yml>`) behind at the OS-default
@@ -654,8 +657,13 @@ docker run --rm -v "$PWD/data:/app/data" --env-file .env \
 ```
 
 A healthy run prints a `config:` path under `/app/data/config.yml` (volume
-persistence) and lists the `keypoints` preset in the DAG (packaged prompts
-loaded).
+persistence). It also proves packaged prompts load: importing the code reads
+`keypoints.md` from the `src` package, so a missing asset would abort `doctor`
+with a `ValueError` before it prints anything. (Whether `keypoints` appears in
+doctor's preset DAG is a *config* property — a migrated `.env` only enables it
+when `OPENAI_KEYPOINTS=true` — so it does not prove packaging.) The
+`docker-smoke.sh` script additionally loads the prompt explicitly inside the
+container to assert packaging directly.
 
 ## Project layout
 

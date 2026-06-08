@@ -1253,9 +1253,13 @@ def init_config(
     elif local:
         target = _local_config_path()
     else:
-        # Match the runtime resolver so init writes exactly where the runtime
-        # reads: GDSTT_CONFIG > DATA_DIR/config.yml (when DATA_DIR set) > user path.
-        target = resolve_config_file_path()
+        # Match the runtime resolver's bootstrap target so init writes where the
+        # runtime reads: GDSTT_CONFIG > DATA_DIR/config.yml (when DATA_DIR set) >
+        # user path. Use the bootstrap resolver, not the public pointer-following
+        # one: `init` creates a fresh config at that location and must not silently
+        # dereference an existing forwarding pointer (keeps GDSTT_CONFIG/user-path
+        # targeting exactly as before, only adding DATA_DIR awareness).
+        target = _resolve_config_file_path()
 
     if target.exists() and _read_config_text(target).strip() and not force:
         raise ValueError(

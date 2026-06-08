@@ -41,7 +41,7 @@ gdstt <auth|doctor|latest|run|run-once|process|transcribe|relabel|speakers|list|
 gdstt config migrate [--force]  # (re)write data/config.yml from the current .env/environment
 gdstt --config PATH <command>   # point at a non-default config.yml (or set GDSTT_CONFIG)
 docker compose up -d --build # containerized deployment (mounts ./data, DATA_DIR=/app/data)
-scripts/docker-smoke.sh        # manual/CI: build + `gdstt doctor`, assert config under /app/data and keypoints in the DAG
+scripts/docker-smoke.sh        # manual/CI: build + `gdstt doctor`, assert config under /app/data and load keypoints.md in-container
 ```
 
 `ffmpeg` must be on PATH for local runs (bundled in the Docker image).
@@ -55,7 +55,12 @@ The deployment is config-owned and persists everything in the mounted volume:
   migration under `./data`; any file-mode `credentials.json`/`token.json` resolve
   under the volume too. Without `DATA_DIR` the resolver would fall back to the OS
   user path (`~/.config/gdstt/...`) and escape the volume — keep `DATA_DIR=/app/data`
-  set.
+  set. `init_config()`'s default (no `--config`/`--local`) target follows the same
+  bootstrap priority as the runtime resolver (`GDSTT_CONFIG` > `<DATA_DIR>/config.yml`
+  > user path) so `gdstt config init` writes exactly where the runtime reads. Keep
+  the two unified — do not reintroduce a separate `GDSTT_CONFIG or _user_config_path()`
+  branch in `init`. Note it uses the non-pointer-following `_resolve_config_file_path()`
+  (init creates a fresh file and must not dereference an existing forwarding pointer).
 - Prompt assets ship inside the `src` package (`src/assets/prompts/*.md`), so the
   Dockerfile's `COPY src ./src` carries them; no separate `assets/` copy and no repo
   fallback. This is also why a wheel / `uv tool install` finds the prompts.
