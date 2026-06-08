@@ -606,14 +606,56 @@ Build and run with the bundled Compose file:
 docker compose up -d --build
 ```
 
-The container mounts `./data` for persistent token storage. Logs are JSON-file with
-a 10 MB / 3-file rotation. Restart policy is `unless-stopped`.
+The image bakes `DATA_DIR=/app/data` and mounts `./data` there, so the config
+resolver keeps **all mutable state inside the volume**: `config.yml`, the first-run
+`.env`->YAML auto-migration, and `credentials.json`/`token.json` are written under
+`./data` and survive restarts. The Compose file also sets `DATA_DIR=/app/data`
+explicitly for clarity, and a bare `docker run` is correct by default thanks to the
+image `ENV`. Logs are JSON-file with a 10 MB / 3-file rotation. Restart policy is
+`unless-stopped`.
+
+The prompt assets ship **inside the `src` package** (`src/assets/prompts/*.md`), so
+the `COPY src ./src` in the `Dockerfile` carries them automatically — there is no
+separate `assets/` copy and the keypoints / OpenAI preset stage works in the
+container with no extra setup.
+
+Google auth follows the config-owned model (see
+[Google Drive setup](#google-drive-setup)): it is inline-first in `config.yml`
+(`google.credentials` / `google.token`), with file mode
+(`gdstt auth use-files --credentials-file data/credentials.json`, which points
+`config.yml` at an operator-supplied `credentials.json`/`token.json` under the
+volume rather than creating them) as the explicit opt-in, and a legacy fallback to
+`data/credentials.json` / `data/token.json`. The generated `config.yml` is written `0600` because it can hold
+inline secrets.
 
 For a fresh VPS:
 
 1. Copy the repo, `.env`, and `data/` (with `credentials.json` and `token.json`) to the host.
 2. `docker compose up -d --build`
 3. Tail logs with `docker compose logs -f` and verify a poll cycle completes.
+
+### Container smoke check
+
+After a build, confirm the two deployment-critical fixes — volume persistence and
+packaged prompts — with the bundled script (a manual/CI check, not a pytest; it
+only runs `gdstt doctor` and spends nothing):
+
+```bash
+scripts/docker-smoke.sh            # builds google-drive-video-stt:smoke, then runs doctor
+scripts/docker-smoke.sh my-image   # use an existing tag instead
+```
+
+Equivalently, by hand:
+
+```bash
+docker build -t google-drive-video-stt:latest .
+docker run --rm -v "$PWD/data:/app/data" --env-file .env \
+  google-drive-video-stt:latest gdstt doctor
+```
+
+A healthy run prints a `config:` path under `/app/data/config.yml` (volume
+persistence) and lists the `keypoints` preset in the DAG (packaged prompts
+loaded).
 
 ## Project layout
 

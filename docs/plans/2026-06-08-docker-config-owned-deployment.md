@@ -153,21 +153,30 @@ Decisions for this plan:
 - Modify: `README.md`, `AGENTS.md`, and `skills/gdstt-cli/SKILL.md` if it
   references Docker; `tests/test_skill_docs.py` only if it asserts new content.
 
-- [ ] Add a documented container smoke check (a short `scripts/docker-smoke.sh` or
+- [x] Add a documented container smoke check (a short `scripts/docker-smoke.sh` or
       a README snippet): `docker build` the image, then
       `docker run --rm -v "$PWD/data:/app/data" --env-file .env <image> gdstt doctor`
       and confirm the printed `config:` path is under `/app/data` and the preset DAG
       lists `keypoints` (prompts loaded). Note that it is a manual/CI check, not a
-      pytest.
-- [ ] Update the Docker section of `README.md` (and `AGENTS.md` Commands/Arch notes)
+      pytest. (Added `scripts/docker-smoke.sh` (executable, `set -euo pipefail`,
+      asserts `config:` under `/app/data/config.yml` and a `keypoints <-` DAG line)
+      plus a "Container smoke check" subsection in the README; the script is a
+      manual/CI check, not a pytest.)
+- [x] Update the Docker section of `README.md` (and `AGENTS.md` Commands/Arch notes)
       for the config-owned model: `DATA_DIR=/app/data` persists everything in the
       volume; first run auto-migrates `.env` into `/app/data/config.yml`; prompts
       ship inside the package (no `assets/` copy needed); Google auth is inline-first
       in the config with file mode (`credentials.json`/`token.json` under the volume)
-      as the opt-in; the config file is written `0600`.
-- [ ] If `tests/test_skill_docs.py` or `SKILL.md` covers Docker/operator commands,
-      keep them consistent and within the SKILL.md 400-line limit.
-- [ ] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+      as the opt-in; the config file is written `0600`. (Rewrote the README "Docker
+      deployment" section and added a "Deployment (Docker)" subsection to `AGENTS.md`
+      plus the smoke-script command in Commands.)
+- [x] If `tests/test_skill_docs.py` or `SKILL.md` covers Docker/operator commands,
+      keep them consistent and within the SKILL.md 400-line limit. (No Docker/operator
+      commands in either: `SKILL.md` mentions Docker only via `DATA_DIR`/config-path
+      concepts and stays at the 400-line limit; `test_skill_docs.py` does not assert
+      Docker content. No changes needed.)
+- [x] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+      (568 passed, 2 skipped; ruff clean.)
 
 ## Verification
 
