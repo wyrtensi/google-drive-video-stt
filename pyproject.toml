@@ -34,7 +34,7 @@ build-backend = "hatchling.build"
 packages = ["src"]
 # Prompt assets are package data under ``src/assets/prompts/``; ship the ``.md``
 # files alongside the Python sources in the wheel.
-artifacts = ["src/assets/prompts/*.md"]
+artifacts = ["src/assets/prompts/*.md", "src/assets/deepgram-keyterms.txt"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src", "README.md", "LICENSE"]

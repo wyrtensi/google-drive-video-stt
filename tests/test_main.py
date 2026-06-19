@@ -1980,6 +1980,96 @@ def test_process_item_skips_preset_reprocess_without_drive_txt(mocker):
     transcribe.assert_not_called()
 
 
+def test_preset_only_reprocess_without_transcript_does_not_run_stt(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+    download = mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    transcribe = mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    run_mock = mocker.patch("src.main.preset_pipeline.run_presets")
+
+    result = main.process_item(
+        service,
+        _item("fid", "video.mp4", has_txt=False, txt_id=None),
+        "folderX",
+        _two_preset_config(drive_mp3_artifact=False),
+        reprocess_presets=["keypoints"],
+    )
+
+    assert result is None
+    download.assert_not_called()
+    transcribe.assert_not_called()
+    run_mock.assert_not_called()
+
+
+def test_apply_local_output_state_tracks_local_txt_and_preset_artifacts(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "video.txt").write_text("local transcript", encoding="utf-8")
+    (out / "video.transcript-cleanup.md").write_text("cleaned", encoding="utf-8")
+    cfg = _two_preset_config(output_target="folder", output_dir=out)
+    item = _item("fid", "video.mp4", has_txt=False, txt_id=None, artifact_ids={})
+
+    main._apply_local_output_state([item], cfg)
+
+    assert item["has_txt"] is True
+    assert item["local_txt_path"] == out / "video.txt"
+    assert item["local_artifact_paths"] == {
+        "transcript-cleanup": out / "video.transcript-cleanup.md"
+    }
+
+
+def test_process_item_reprocesses_presets_from_local_folder_transcript(mocker, tmp_path):
+    service = MagicMock()
+    out = tmp_path / "out"
+    out.mkdir()
+    local_txt = out / "video.txt"
+    local_txt.write_text("existing local transcript", encoding="utf-8")
+    mocker.patch("src.main.transcribe_file")
+    mocker.patch("src.main.drive.download_text")
+    run_mock = mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="cleaned"
+            ),
+            "keypoints": PresetResult(name="keypoints", text="notes"),
+        },
+    )
+
+    item = _item("fid", "video.mp4", has_txt=True, txt_id=None, artifact_ids={})
+    item["local_txt_path"] = local_txt
+    cfg = _two_preset_config(output_target="folder", output_dir=out)
+    result = main.process_item(
+        service,
+        item,
+        "folderX",
+        cfg,
+        reprocess_presets=["keypoints"],
+    )
+
+    assert result is not None
+    assert run_mock.call_args.args[0] == "existing local transcript"
+    assert (out / "video.transcript-cleanup.md").read_text(encoding="utf-8") == "cleaned"
+    assert (out / "video.keypoints.md").read_text(encoding="utf-8") == "notes"
+
+
+def test_dry_run_preset_names_expands_missing_dependencies_for_reprocess():
+    cfg = _two_preset_config()
+    item = _item("fid", "video.mp4", has_txt=True, txt_id="txt-1", artifact_ids={})
+
+    names = main._dry_run_preset_names(
+        item,
+        cfg,
+        needs_txt=False,
+        reprocess_txt=False,
+        reprocess_presets=["keypoints"],
+    )
+
+    assert names == ["transcript-cleanup", "keypoints"]
+
+
 def test_pending_items_includes_drive_txt_with_missing_preset():
     cfg = _two_preset_config()
     done = _item(

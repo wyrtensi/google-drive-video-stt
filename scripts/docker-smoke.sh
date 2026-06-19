@@ -1,22 +1,15 @@
 #!/usr/bin/env bash
 #
-# Container smoke check for the config-owned preset DAG deployment.
+# Container smoke check for the config-owned deployment.
 #
-# This is a MANUAL / CI check, not a pytest. It proves the two deployment fixes
-# this image depends on:
-#   1. Config persists in the mounted volume: `gdstt doctor` reports a `config:`
-#      path under /app/data (DATA_DIR=/app/data is baked into the image), so the
-#      first-run .env->YAML migration and credentials/token land in ./data.
-#   2. Packaged prompts are reachable: load_packaged_prompt('keypoints.md')
-#      resolves inside the container, proving the prompts ship inside the
-#      `src` package (no top-level assets/ copy needed).
+# This is a MANUAL / CI check, not a pytest. It proves the deployment is
+# self-contained without `.env`:
+#   1. A fresh config initializes inside the mounted /app/data volume.
+#   2. The generated config points at files that exist inside that volume.
+#   3. Packaged prompts are reachable inside the image.
 #
 # Usage:
 #   scripts/docker-smoke.sh [image]
-#
-# Requires a local `.env` (used for the first-run migration) and a writable
-# ./data directory. It only runs `gdstt doctor`, which never contacts Drive,
-# Deepgram, or OpenAI and spends nothing.
 set -euo pipefail
 
 IMAGE="${1:-google-drive-video-stt:smoke}"
@@ -26,25 +19,24 @@ cd "$REPO_ROOT"
 echo "==> Building image: $IMAGE"
 docker build -t "$IMAGE" .
 
-mkdir -p data
-ENV_ARGS=()
-if [[ -f .env ]]; then
-  ENV_ARGS+=(--env-file .env)
-else
-  echo "warning: no .env found; doctor still runs but no migration source is present" >&2
-fi
+SMOKE_DATA_DIR="$(mktemp -d)"
+cleanup() {
+  rm -rf "$SMOKE_DATA_DIR"
+}
+trap cleanup EXIT
+
+run_gdstt() {
+  docker run --rm -v "$SMOKE_DATA_DIR:/app/data" "$IMAGE" gdstt "$@"
+}
+
+echo "==> Initializing config in a clean /app/data volume"
+run_gdstt config init --force
+run_gdstt config set stt.deepgram.api_key smoke-deepgram-key >/dev/null
+run_gdstt config set openai.api_key smoke-openai-key >/dev/null
 
 echo "==> Running gdstt doctor in the container"
-# Capture stdout AND stderr so a failing run is debuggable. `set -e` would abort
-# on a non-zero `doctor` exit before we echo the captured output, so guard the
-# assignment with `|| doctor_status=$?` and echo unconditionally below.
-doctor_status=0
-output="$(docker run --rm -v "$PWD/data:/app/data" "${ENV_ARGS[@]}" "$IMAGE" gdstt doctor 2>&1)" || doctor_status=$?
+output="$(run_gdstt doctor 2>&1)"
 echo "$output"
-if [[ "$doctor_status" -ne 0 ]]; then
-  echo "FAIL: gdstt doctor exited with status $doctor_status (output above)" >&2
-  exit "$doctor_status"
-fi
 
 echo "==> Verifying config path is under /app/data"
 config_line="$(printf '%s\n' "$output" | grep '^config:' || true)"
@@ -53,15 +45,12 @@ if [[ "$config_line" != *"/app/data/config.yml"* ]]; then
   exit 1
 fi
 
-# Whether `keypoints` shows up in `doctor`'s preset DAG is a config property (the
-# .env->YAML migration only enables it when OPENAI_KEYPOINTS=true), NOT a packaging
-# property - so it can't prove prompts ship in the image. Instead load the prompt
-# directly inside the container: this fails iff the packaged asset is unreachable.
-echo "==> Verifying packaged prompts are reachable inside the container"
-if ! docker run --rm "$IMAGE" \
-  python -c "from src.presets import load_packaged_prompt; assert load_packaged_prompt('keypoints.md').strip()"; then
-  echo "FAIL: packaged prompt 'keypoints.md' unreachable inside the container" >&2
-  exit 1
-fi
+echo "==> Verifying provider validation works without external services"
+docker run --rm -v "$SMOKE_DATA_DIR:/app/data" "$IMAGE" \
+  python -c "from src.config import load_config; cfg = load_config(); assert cfg.deepgram_keyterms"
 
-echo "==> OK: config persists under /app/data and packaged prompts load"
+echo "==> Verifying packaged prompts are reachable inside the container"
+docker run --rm "$IMAGE" \
+  python -c "from src.presets import load_packaged_prompt; assert load_packaged_prompt('keypoints.md').strip()"
+
+echo "==> OK: clean config-only Docker smoke passed"

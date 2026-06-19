@@ -33,8 +33,8 @@ speech-to-text pipelines.
 
 - Python 3.11+ and [`uv`](https://github.com/astral-sh/uv) for local development
 - `ffmpeg` available on `PATH` for local runs (already included in the Docker image)
-- Google Cloud project with the Drive API enabled and OAuth client metadata in
-  `data/credentials.json`
+- Google Cloud project with the Drive API enabled and OAuth client metadata
+  imported into `config.yml` or supplied in file mode
 - A Deepgram API key for transcription (`stt.provider: deepgram`)
 - Optional: an OpenAI API key when any OpenAI preset is enabled (e.g. `keypoints`)
 - Optional: a Telegram bot token + chat ID for error notifications
@@ -92,8 +92,8 @@ gdstt config migrate   # writes config.yml from .env; first run also does this
 [Configuration](#configuration)). Point at a non-default file with
 `gdstt --config PATH ...` or the `GDSTT_CONFIG` env var.
 
-After `data/credentials.json` is in place (see below), authenticate once and
-verify access with the safe operator flow:
+After Google credentials are imported inline (or file mode is configured; see
+below), authenticate once and verify access with the safe operator flow:
 
 ```bash
 gdstt auth
@@ -209,13 +209,14 @@ Invoke-RestMethod `
   -Body $body
 ```
 
-Copy the returned `id` into `.env` as `FOLDER_IDS=<folder-id>`. For an existing
-Drive folder, the folder id is the last path segment in the browser URL:
+Copy the returned `id` into `config.yml` as `folder_ids: [<folder-id>]` (or use
+`gdstt config set folder_ids <folder-id>`). For an existing Drive folder, the
+folder id is the last path segment in the browser URL:
 `https://drive.google.com/drive/folders/<folder-id>`.
 
 ## Configuration
 
-All configuration lives in `data/config.yml`. It is grouped under `output`, `stt`
+All configuration lives in the active `config.yml`. It is grouped under `output`, `stt`
 (with a nested `deepgram` block), and `openai`, plus a top-level `presets` map. On
 first run (or via `gdstt config migrate`) the file is auto-generated from the
 `.env`/environment described by the table below; afterwards `.env` is no longer
@@ -275,7 +276,7 @@ these YAML keys:
 | `DRIVE_MP3_ARTIFACT` | auto | Upload an MP3 artifact to Drive. Defaults to `false` for `DEEPGRAM_AUDIO_SOURCE=m4a_copy`; `true` otherwise |
 | `TELEGRAM_BOT_TOKEN` | (empty) | If set with chat ID, errors are posted to Telegram |
 | `TELEGRAM_CHAT_ID` | (empty) | Telegram chat to receive error notifications |
-| `DATA_DIR` | `data` | Directory holding `credentials.json` and `token.json` |
+| `DATA_DIR` | `data` | Legacy migration/config-path override; in config.yml use `data_dir` |
 | `PROXY_URL` | (empty) | Optional `http`/`https`/`socks5` proxy for Telegram, Deepgram, and OpenAI |
 | `STT_PROVIDER` | `deepgram` | `deepgram` by default. Set `disabled` (or empty) to skip transcription and only manage MP3 artifacts |
 | `STT_LANGUAGE` | (empty) | Language hint. `deepgram`: empty defaults to `ru` |
@@ -315,8 +316,8 @@ client dependency.
 Setup:
 
 1. Create a Deepgram API key.
-2. Set `STT_PROVIDER=deepgram` and either `DEEPGRAM_API_KEY` or
-   `DEEPGRAM_API_KEY_FILE` in `.env`.
+2. Set `stt.provider: deepgram` and either `stt.deepgram.api_key` or
+   `stt.deepgram.api_key_file` in `config.yml`.
 
 `DEEPGRAM_API_KEY_FILE` may contain either the raw token or JSON with one of these
 fields: `api_key`, `deepgram_api_key`, or `DEEPGRAM_API_KEY`. The API key is never
@@ -656,11 +657,12 @@ docker compose up -d --build
 ```
 
 The image bakes `DATA_DIR=/app/data` and mounts `./data` there, so the config
-resolver keeps **all mutable state inside the volume**: `config.yml`, the first-run
-`.env`->YAML auto-migration, and `credentials.json`/`token.json` are written under
-`./data` and survive restarts. The Compose file also sets `DATA_DIR=/app/data`
-explicitly for clarity, and a bare `docker run` is correct by default thanks to the
-image `ENV`. Logs are JSON-file with a 10 MB / 3-file rotation. Restart policy is
+resolver keeps **all mutable state inside the volume**: `config.yml`,
+`prompts/`, `config/deepgram-keyterms.txt`, and credentials/token files are
+written under `./data` and survive restarts. The Compose file also sets
+`DATA_DIR=/app/data` explicitly for clarity, and a bare `docker run` is correct by
+default thanks to the image `ENV`. Logs are JSON-file with a 10 MB / 3-file
+rotation. Restart policy is
 `unless-stopped`. Because `gdstt stop` is sticky (it pauses the loop without exiting
 and `main()` never auto-enables on boot), the stop survives this restart policy:
 `docker compose exec <svc> gdstt stop` pauses processing and `gdstt start` resumes it;
@@ -677,20 +679,24 @@ Google auth follows the config-owned model (see
 (`gdstt auth use-files --credentials-file data/credentials.json`, which points
 `config.yml` at an operator-supplied `credentials.json`/`token.json` under the
 volume rather than creating them) as the explicit opt-in, and a legacy fallback to
-`data/credentials.json` / `data/token.json`. The generated `config.yml` is written `0600` because it can hold
-inline secrets.
+`credentials.json` / `token.json` beside the config. The generated `config.yml`
+is written `0600` on POSIX systems because it can hold inline secrets.
 
 For a fresh VPS:
 
-1. Copy the repo, `.env`, and `data/` (with `credentials.json` and `token.json`) to the host.
-2. `docker compose up -d --build`
-3. Tail logs with `docker compose logs -f` and verify a poll cycle completes.
+1. Copy the repo and create `./data` on the host.
+2. Generate the volume-owned config:
+   `docker compose run --rm google-drive-video-stt gdstt config init --force`
+3. Fill `./data/config.yml` (folder IDs, Deepgram/OpenAI keys, and Google auth
+   inline or file mode).
+4. `docker compose up -d --build`
+5. Tail logs with `docker compose logs -f` and verify a poll cycle completes.
 
 ### Container smoke check
 
-After a build, confirm the two deployment-critical fixes — volume persistence and
-packaged prompts — with the bundled script (a manual/CI check, not a pytest; it
-only runs `gdstt doctor` and spends nothing):
+After a build, confirm the deployment-critical config-only path — volume
+persistence, generated local assets, provider validation, and packaged prompts —
+with the bundled script (a manual/CI check, not a pytest; it spends nothing):
 
 ```bash
 scripts/docker-smoke.sh            # builds google-drive-video-stt:smoke, then runs doctor
@@ -701,18 +707,16 @@ Equivalently, by hand:
 
 ```bash
 docker build -t google-drive-video-stt:latest .
-docker run --rm -v "$PWD/data:/app/data" --env-file .env \
+docker run --rm -v "$PWD/data:/app/data" \
+  google-drive-video-stt:latest gdstt config init --force
+docker run --rm -v "$PWD/data:/app/data" \
   google-drive-video-stt:latest gdstt doctor
 ```
 
 A healthy run prints a `config:` path under `/app/data/config.yml` (volume
-persistence). It also proves packaged prompts load: importing the code reads
-`keypoints.md` from the `src` package, so a missing asset would abort `doctor`
-with a `ValueError` before it prints anything. (Whether `keypoints` appears in
-doctor's preset DAG is a *config* property — a migrated `.env` only enables it
-when `OPENAI_KEYPOINTS=true` — so it does not prove packaging.) The
-`docker-smoke.sh` script additionally loads the prompt explicitly inside the
-container to assert packaging directly.
+persistence). The smoke script also verifies that a generated config can pass
+provider validation without reaching external services and explicitly loads
+`keypoints.md` from the `src` package to assert prompt packaging.
 
 ## Project layout
 

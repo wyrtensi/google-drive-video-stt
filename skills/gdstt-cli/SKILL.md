@@ -2,8 +2,8 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.5.0
-last_updated: 2026-06-09
+version: 2.5.1
+last_updated: 2026-06-19
 ---
 
 # gdstt CLI
@@ -177,10 +177,9 @@ Support/gdstt/...`, Windows `%APPDATA%\gdstt\...`; рядом `<config_dir>/prom
   `.env`/окружения (с `presets`). Авто-мигрируется при первом запуске, если файл
   отсутствует/пуст; это явная регенерация.
 - `config init [--local] [--data-dir DIR] [--output-dir DIR] [--prompt-dir DIR]
-  [--force]` - свежий полный конфиг из дефолтов: вся цепочка `transcript-cleanup ->
-  keypoints + action-items` включена, `openai.batch: true`, + копия промптов рядом.
-  `--local` -> `./data/config.yml`; `--output-dir` -> `output.target=folder`+`dir`;
-  `--prompt-dir` копирует промпты туда и направляет `prompt_file`.
+  [--force]` - свежий полный конфиг: цепочка `transcript-cleanup -> keypoints +
+  action-items`, `openai.batch: true`, промпты и `config/deepgram-keyterms.txt` рядом.
+  `--local` -> `./data/config.yml`; `--output-dir` -> folder; `--prompt-dir` -> промпты туда.
 - `config path` - путь к активному конфигу без валидации секретов; при указателе
   (`config_file:`) печатает обе точки (bootstrap и effective).
 - `config link DIR [--copy-prompts] [--force]` - перенести/создать полный конфиг
@@ -384,6 +383,7 @@ presets:
   Сначала `--dry-run`; номера стадий бери из `gdstt doctor`.
 - У `run` нет превью-режима — используй после контролируемых проверок. Пауза -
   `gdstt stop` (sticky, переживает рестарт), возобновление - `gdstt start`/`gdstt run`.
+- Docker config-only: compose не требует `.env`; сначала `docker compose run --rm google-drive-video-stt gdstt config init --force`, затем заполни `./data/config.yml`.
 - Пустые транскрипты падают намеренно; никогда не принимай пустой TXT за успех.
 - Никогда не печатай API-ключи, OAuth-токены, `credentials.json`, `token.json`.
 

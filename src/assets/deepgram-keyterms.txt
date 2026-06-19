@@ -1,0 +1,16 @@
+# Technical interview terms for Deepgram Nova-3 keyterm prompting.
+Kubernetes
+Docker
+Redis
+Ruby on Rails
+CDN
+ingress
+autoscaling
+TypeScript
+React
+Vue
+Go
+Rust
+backend
+frontend
+adblock

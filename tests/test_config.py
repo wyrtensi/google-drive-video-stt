@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -1061,6 +1062,22 @@ def test_migrate_config_writes_from_env(monkeypatch, tmp_path):
     assert data["presets"]["keypoints"]["enabled"] is False
 
 
+def test_auto_migration_copies_default_keyterms_into_config_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOLDER_IDS", "m1")
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    config_file = tmp_path / "config.yml"
+
+    load_config(config_path=config_file, validate_providers=False)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["stt"]["deepgram"]["keyterms_file"] == (
+        "config/deepgram-keyterms.txt"
+    )
+    copied_keyterms = tmp_path / "config" / "deepgram-keyterms.txt"
+    assert copied_keyterms.is_file()
+    assert "Kubernetes" in copied_keyterms.read_text(encoding="utf-8")
+
+
 def test_migrate_config_refuses_existing_without_force(monkeypatch, tmp_path):
     monkeypatch.setenv("STT_PROVIDER", "disabled")
     config_file = tmp_path / "config.yml"
@@ -1473,6 +1490,8 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
 
     assert path == config_file
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["data_dir"] == "."
+    assert data["stt"]["deepgram"]["keyterms_file"] == "config/deepgram-keyterms.txt"
     assert data["presets"]["keypoints"]["enabled"] is True
     assert data["presets"]["keypoints"]["prompt_file"] == "prompts/keypoints.md"
     # The full default chain is enabled out of the box, with transcript-cleanup
@@ -1492,13 +1511,29 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert (tmp_path / "prompts" / "keypoints.md").is_file()
     assert (tmp_path / "prompts" / "transcript-cleanup.md").is_file()
     assert (tmp_path / "prompts" / "action-items.md").is_file()
+    assert (tmp_path / "config" / "deepgram-keyterms.txt").is_file()
     # The generated config loads back without provider secrets and yields the chain.
     cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.data_dir == tmp_path
     assert {p.name for p in cfg.presets} == {
         "transcript-cleanup",
         "keypoints",
         "action-items",
     }
+
+
+def test_init_config_validates_with_copied_keyterms(tmp_path):
+    config_file = tmp_path / "config.yml"
+    init_config(config_path=config_file)
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    data["stt"]["deepgram"]["api_key"] = "dg-test"
+    data["openai"]["api_key"] = "sk-test"
+    _write_yaml(config_file, data)
+
+    cfg = load_config(config_path=config_file)
+
+    assert cfg.deepgram_keyterms_file == tmp_path / "config" / "deepgram-keyterms.txt"
+    assert "Kubernetes" in cfg.deepgram_keyterms
 
 
 def test_init_local_writes_under_cwd_data(monkeypatch, tmp_path):
@@ -2030,7 +2065,10 @@ def test_yaml_google_file_paths_resolve_relative(tmp_path):
 
     assert cfg.google_credentials is None
     assert cfg.google_credentials_file == tmp_path / "secrets" / "creds.json"
-    assert cfg.google_token_file == Path("/abs/token.json")
+    expected_token = Path("/abs/token.json")
+    if not expected_token.is_absolute():
+        expected_token = config_file.parent / expected_token
+    assert cfg.google_token_file == expected_token
 
 
 def test_yaml_google_back_compat_data_dir_fallback(tmp_path):
@@ -2126,8 +2164,26 @@ def test_use_google_files_switches_and_clears_inline(tmp_path):
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     assert "credentials" not in data["google"]
     assert "token" not in data["google"]
-    assert data["google"]["credentials_file"] == str(creds_file)
-    assert data["google"]["token_file"] == str(creds_file.parent / "token.json")
+    assert data["google"]["credentials_file"] == "creds/client.json"
+    assert data["google"]["token_file"] == "creds/token.json"
+
+
+def test_use_google_files_resolves_cli_relative_paths_before_serializing(monkeypatch, tmp_path):
+    app_dir = tmp_path / "app"
+    data_dir = app_dir / "data"
+    config_file = data_dir / "config.yml"
+    init_config(config_path=config_file)
+    (data_dir / "credentials.json").write_text("{}", encoding="utf-8")
+    monkeypatch.chdir(app_dir)
+
+    use_google_files("data/credentials.json", config_path=config_file)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["google"]["credentials_file"] == "credentials.json"
+    assert data["google"]["token_file"] == "token.json"
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.google_credentials_file == data_dir / "credentials.json"
+    assert cfg.google_token_file == data_dir / "token.json"
 
 
 def test_use_google_files_honors_explicit_token_file(tmp_path):
@@ -2138,7 +2194,7 @@ def test_use_google_files_honors_explicit_token_file(tmp_path):
     use_google_files(creds_file, token_file=token_file, config_path=config_file)
 
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    assert data["google"]["token_file"] == str(token_file)
+    assert data["google"]["token_file"] == "elsewhere/tok.json"
 
 
 def test_config_get_masks_inline_google_secrets(tmp_path):
@@ -2240,6 +2296,8 @@ def test_config_prompt_file_overrides_builtin_keypoints_instructions(tmp_path):
 def test_fresh_config_is_owner_only(tmp_path):
     import stat
 
+    if os.name == "nt":
+        pytest.skip("Windows does not expose POSIX owner-only mode bits reliably")
     config_file = tmp_path / "config.yml"
     init_config(config_path=config_file)  # brand-new file
     mode = stat.S_IMODE(config_file.stat().st_mode)

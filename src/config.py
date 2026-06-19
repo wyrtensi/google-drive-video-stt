@@ -6,6 +6,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, replace
+from importlib.resources import files
 from pathlib import Path
 
 import yaml
@@ -46,6 +47,7 @@ DEEPGRAM_DIARIZE_MODELS = ("latest", "v1")
 DEEPGRAM_AUDIO_SOURCES = ("m4a_copy", "mp3_96k", "mp3_192k")
 DEEPGRAM_TXT_FORMATTERS = ("word_speaker", "utterance")
 DEEPGRAM_DEFAULT_KEYTERMS_FILE = Path("config/deepgram-keyterms.txt")
+DEEPGRAM_KEYTERMS_ASSET = "deepgram-keyterms.txt"
 DEEPGRAM_MAX_KEYTERMS = 100
 CHECKOUT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -1014,7 +1016,7 @@ def _default_config_dict(
         "folder_ids": [],
         "poll_interval": 600,
         "bitrate": "96k",
-        "data_dir": data_dir or "data",
+        "data_dir": data_dir or ".",
         "proxy_url": "",
         "output": {
             "target": (output_target or "drive"),
@@ -1031,7 +1033,7 @@ def _default_config_dict(
                 "audio_source": "m4a_copy",
                 "txt_formatter": "word_speaker",
                 "keyterms_enabled": True,
-                "keyterms_file": str(DEEPGRAM_DEFAULT_KEYTERMS_FILE),
+                "keyterms_file": DEEPGRAM_DEFAULT_KEYTERMS_FILE.as_posix(),
             },
         },
         "openai": {
@@ -1066,6 +1068,35 @@ def copy_prompt_assets(target_dir: Path, *, overwrite: bool = False) -> list[Pat
         dest.write_text(load_packaged_prompt(name), encoding="utf-8")
         written.append(dest)
     return written
+
+
+def load_packaged_keyterms() -> str:
+    """Read the packaged default Deepgram keyterms file."""
+    try:
+        text = (
+            files("src.assets")
+            .joinpath(DEEPGRAM_KEYTERMS_ASSET)
+            .read_text(encoding="utf-8-sig")
+        )
+    except (FileNotFoundError, ModuleNotFoundError) as exc:
+        raise ValueError(
+            f"packaged Deepgram keyterms asset {DEEPGRAM_KEYTERMS_ASSET!r} is missing"
+        ) from exc
+    if not text.strip():
+        raise ValueError(
+            f"packaged Deepgram keyterms asset {DEEPGRAM_KEYTERMS_ASSET!r} is empty"
+        )
+    return text
+
+
+def copy_deepgram_keyterms_asset(config_dir: Path, *, overwrite: bool = False) -> Path:
+    """Copy the packaged Deepgram keyterms file beside a generated config."""
+    dest = config_dir / DEEPGRAM_DEFAULT_KEYTERMS_FILE
+    if dest.exists() and not overwrite:
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(load_packaged_keyterms(), encoding="utf-8")
+    return dest
 
 
 def _google_to_yaml_dict(config: Config, config_file: Path | None) -> dict:
@@ -1154,6 +1185,20 @@ def _dump_yaml(data: dict) -> str:
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
+def _uses_default_env_keyterms_file() -> bool:
+    return not os.environ.get("DEEPGRAM_KEYTERMS_FILE", "").strip()
+
+
+def _config_to_owned_yaml_dict(config: Config, config_file: Path) -> dict:
+    data = _config_to_yaml_dict(config, config_file)
+    if _uses_default_env_keyterms_file():
+        copy_deepgram_keyterms_asset(config_file.parent)
+        data["stt"]["deepgram"]["keyterms_file"] = (
+            DEEPGRAM_DEFAULT_KEYTERMS_FILE.as_posix()
+        )
+    return data
+
+
 def _write_config_text(path: Path, text: str) -> None:
     """Write the effective config and restrict it to owner-only (0600).
 
@@ -1213,7 +1258,10 @@ def load_config(
     config = _config_from_env(validate_providers=validate_providers)
     try:
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        _write_config_text(resolved, _dump_yaml(_config_to_yaml_dict(config, resolved)))
+        _write_config_text(
+            resolved,
+            _dump_yaml(_config_to_owned_yaml_dict(config, resolved)),
+        )
         copy_prompt_assets(resolved.parent / PROMPTS_DIR_NAME)
         logger.info("Migrated configuration from environment to %s", resolved)
     except OSError as exc:
@@ -1239,7 +1287,10 @@ def migrate_config(
         )
     config = _config_from_env(validate_providers=False)
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    _write_config_text(resolved, _dump_yaml(_config_to_yaml_dict(config, resolved)))
+    _write_config_text(
+        resolved,
+        _dump_yaml(_config_to_owned_yaml_dict(config, resolved)),
+    )
     copy_prompt_assets(resolved.parent / PROMPTS_DIR_NAME)
     return resolved
 
@@ -1310,6 +1361,7 @@ def init_config(
         prompt_rel = None
 
     copy_prompt_assets(prompts_target)
+    copy_deepgram_keyterms_asset(config_dir)
 
     data_dir_value = (
         _rel_posix(Path(data_dir), config_dir) if data_dir is not None else None
@@ -1375,6 +1427,7 @@ def link_config(
         # No full config yet: create one from defaults at the destination.
         prompts_target = dest_dir / PROMPTS_DIR_NAME
         copy_prompt_assets(prompts_target)
+        copy_deepgram_keyterms_asset(dest_dir)
         _write_config_text(dest, _dump_yaml(_default_config_dict()))
         # Point the bootstrap path at the new destination unless it is the same file.
         if bootstrap.resolve() != dest.resolve():
@@ -1714,20 +1767,23 @@ def use_google_files(
     inline ``google.credentials``/``google.token`` mappings so the file pointers are
     the single source. ``token_file`` defaults to ``<credentials parent>/token.json``.
     """
+    effective, data = _load_effective_yaml_dict(config_path)
     creds_path = Path(credentials_file)
+    if not creds_path.is_absolute():
+        creds_path = Path.cwd() / creds_path
     if token_file is None:
         token_path = creds_path.parent / "token.json"
     else:
         token_path = Path(token_file)
-
-    effective, data = _load_effective_yaml_dict(config_path)
+        if not token_path.is_absolute():
+            token_path = Path.cwd() / token_path
     google = data.setdefault("google", {})
     if not isinstance(google, dict):
         google = {}
         data["google"] = google
     google.pop("credentials", None)
     google.pop("token", None)
-    google["credentials_file"] = str(creds_path)
-    google["token_file"] = str(token_path)
+    google["credentials_file"] = _relpath_for_config(creds_path, effective)
+    google["token_file"] = _relpath_for_config(token_path, effective)
     _atomic_write_validated(effective, data, config_path=config_path)
     return effective

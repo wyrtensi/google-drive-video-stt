@@ -44,7 +44,7 @@ gdstt start                     # set run.enabled=true so a paused `gdstt run` l
 gdstt config migrate [--force]  # (re)write data/config.yml from the current .env/environment
 gdstt --config PATH <command>   # point at a non-default config.yml (or set GDSTT_CONFIG)
 docker compose up -d --build # containerized deployment (mounts ./data, DATA_DIR=/app/data)
-scripts/docker-smoke.sh        # manual/CI: build + `gdstt doctor`, assert config under /app/data and load keypoints.md in-container
+scripts/docker-smoke.sh      # manual/CI: clean config-only Docker smoke
 ```
 
 `ffmpeg` must be on PATH for local runs (bundled in the Docker image).
@@ -54,9 +54,9 @@ scripts/docker-smoke.sh        # manual/CI: build + `gdstt doctor`, assert confi
 The deployment is config-owned and persists everything in the mounted volume:
 
 - The image bakes `ENV DATA_DIR=/app/data` and Compose mounts `./data:/app/data`,
-  so the config resolver writes `config.yml` and the first-run `.env`->YAML
-  migration under `./data`; any file-mode `credentials.json`/`token.json` resolve
-  under the volume too. Without `DATA_DIR` the resolver would fall back to the OS
+  so the config resolver writes `config.yml`, prompt copies,
+  `config/deepgram-keyterms.txt`, and any file-mode `credentials.json`/`token.json`
+  under the volume. Without `DATA_DIR` the resolver would fall back to the OS
   user path (`~/.config/gdstt/...`) and escape the volume — keep `DATA_DIR=/app/data`
   set. `init_config()`'s default (no `--config`/`--local`) target follows the same
   bootstrap priority as the runtime resolver (`GDSTT_CONFIG` > `<DATA_DIR>/config.yml`
@@ -68,12 +68,12 @@ The deployment is config-owned and persists everything in the mounted volume:
   Dockerfile's `COPY src ./src` carries them; no separate `assets/` copy and no repo
   fallback. This is also why a wheel / `uv tool install` finds the prompts.
 - Google auth is inline-first in `config.yml` (`google.credentials`/`google.token`),
-  with file mode as the opt-in and a legacy `data/credentials.json`/`token.json`
-  fallback. The generated `config.yml` is written `0600`.
-- `scripts/docker-smoke.sh` is the manual/CI verification: it builds the image and
-  runs `gdstt doctor` (asserting the `config:` path is under `/app/data`) and loads
-  the packaged `keypoints` prompt inside the container (proving both the volume and
-  packaged-prompt fixes).
+  with file mode as the opt-in and a legacy `credentials.json`/`token.json`
+  fallback under `data_dir`. The generated `config.yml` is written `0600` on POSIX.
+- `scripts/docker-smoke.sh` is the manual/CI verification: it builds the image,
+  initializes a clean `/app/data` volume without `.env`, runs `gdstt doctor`,
+  validates `run-once --dry-run`, and loads the packaged `keypoints` prompt inside
+  the container.
 
 ## Architecture
 
