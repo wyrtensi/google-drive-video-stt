@@ -18,6 +18,7 @@ TXT_MIME = "text/plain"
 MD_MIME = "text/markdown"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
+SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 PAGE_SIZE = 1000
 # Meet nests meeting folders one level under the root; the slack absorbs an
 # unexpected layer without letting a circular parent chain run away.
@@ -113,7 +114,8 @@ def _list_files_by_mimes(
                     # Only whether Drive has finished with the video is read, so one
                     # cheap sub-field stands in for the whole object on a listing the
                     # polling loop makes for every folder, every cycle.
-                    "videoMediaMetadata(durationMillis), appProperties)"
+                    "videoMediaMetadata(durationMillis), appProperties, "
+                    "shortcutDetails(targetId, targetMimeType))"
                 ),
                 pageSize=PAGE_SIZE,
                 pageToken=page_token,
@@ -130,16 +132,22 @@ def _list_files_by_mimes(
 
 
 def list_mp4_timestamps(service: Any, folder_id: str) -> list[dict]:
-    """Return every mp4 in a folder with its timestamps and appProperties.
+    """Return every recording in a folder with its timestamps and appProperties.
 
     ``_list_files_by_mime`` keeps its field list small because the polling loop calls
     it every cycle. Only the date repair needs ``createdTime``/``modifiedTime``, so it
     asks for them here rather than widening the hot path.
+
+    A shortcut to a recording counts: a call followed through one keeps its markers on
+    the shortcut, and a report that skipped shortcuts would say those calls were never
+    sent anywhere.
     """
     files: list[dict] = []
     page_token: str | None = None
     query = (
-        f"'{folder_id}' in parents and mimeType = '{MP4_MIME}' and trashed = false"
+        f"'{folder_id}' in parents and (mimeType = '{MP4_MIME}' or "
+        f"(mimeType = '{SHORTCUT_MIME}' and "
+        f"shortcutDetails.targetMimeType = '{MP4_MIME}')) and trashed = false"
     )
     while True:
         response = (
@@ -147,8 +155,8 @@ def list_mp4_timestamps(service: Any, folder_id: str) -> list[dict]:
             .list(
                 q=query,
                 fields=(
-                    "nextPageToken, "
-                    "files(id, name, createdTime, modifiedTime, appProperties)"
+                    "nextPageToken, files(id, name, mimeType, createdTime, "
+                    "modifiedTime, appProperties, shortcutDetails(targetId, targetMimeType))"
                 ),
                 pageSize=PAGE_SIZE,
                 pageToken=page_token,
@@ -157,7 +165,12 @@ def list_mp4_timestamps(service: Any, folder_id: str) -> list[dict]:
             )
             .execute()
         )
-        files.extend(response.get("files", []))
+        files.extend(
+            f for f in response.get("files", [])
+            # The query already says this; repeating it keeps the answer right on a
+            # Drive -- or a fake -- that ignores the shortcutDetails clause.
+            if f.get("mimeType") != SHORTCUT_MIME or names_a_recording(f)
+        )
         page_token = _next_page_token(response)
         if page_token is None:
             break
@@ -265,11 +278,20 @@ def find_meet_transcript(service: Any, folder_id: str, video_name: str) -> dict 
     Matched by name rather than by being the only document in the folder: a recurring
     meeting keeps every instance in the same subfolder, so "the transcript here" is
     not a question with one answer.
+
+    An attendee's meeting folder holds a shortcut to the organizer's transcript rather
+    than the document. A shortcut has nothing to export, so for one of those the
+    target's id is returned -- whether it opens is the caller's question.
     """
     wanted = meet_transcript_name(video_name)
-    for doc in _list_files_by_mimes(service, folder_id, (GOOGLE_DOC_MIME,)):
-        if doc.get("name") == wanted:
+    for doc in _list_files_by_mimes(service, folder_id, (GOOGLE_DOC_MIME, SHORTCUT_MIME)):
+        if doc.get("name") != wanted:
+            continue
+        if doc.get("mimeType") != SHORTCUT_MIME:
             return doc
+        details = doc.get("shortcutDetails") or {}
+        if details.get("targetMimeType") == GOOGLE_DOC_MIME and details.get("targetId"):
+            return {"id": details["targetId"], "name": doc.get("name")}
     return None
 
 
@@ -339,7 +361,9 @@ def list_changes(service: Any, page_token: str) -> tuple[list[dict], str]:
 
     The field list is what makes the feed cheap: with ``mimeType``, ``parents`` and
     ``trashed`` on the entry itself, the caller can discard everything that is not a
-    live video of ours without a single ``files.get``.
+    live video of ours without a single ``files.get``. ``shortcutDetails`` belongs to
+    that list too: an attended call arrives as a shortcut, and only its target's type
+    says it is a recording.
     """
     entries: list[dict] = []
     cursor = page_token
@@ -351,7 +375,8 @@ def list_changes(service: Any, page_token: str) -> tuple[list[dict], str]:
                 fields=(
                     "nextPageToken, newStartPageToken, "
                     "changes(fileId, removed, "
-                    "file(id, name, mimeType, parents, trashed))"
+                    "file(id, name, mimeType, parents, trashed, "
+                    "shortcutDetails(targetMimeType)))"
                 ),
                 pageSize=PAGE_SIZE,
                 supportsAllDrives=True,
@@ -418,18 +443,29 @@ def find_configured_ancestor(
     return found
 
 
-SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
+def names_a_recording(file_info: dict) -> bool:
+    """Whether a listed file or change entry stands for a recording.
+
+    Meet gives the organizer the recording and every other participant a shortcut to
+    it, and a shortcut stays a shortcut whoever looks at it: Drive reports its own
+    mime type and keeps the real one in ``shortcutDetails.targetMimeType``.
+    """
+    mime = file_info.get("mimeType")
+    if mime == MP4_MIME:
+        return True
+    details = file_info.get("shortcutDetails") or {}
+    return mime == SHORTCUT_MIME and details.get("targetMimeType") == MP4_MIME
 
 
 def list_recording_shortcuts(service: Any, folder_id: str) -> list[dict]:
     """Shortcuts to recordings in a folder and its meeting subfolders.
 
     Meet files a call into every participant's folder, but only the organizer gets
-    the recording itself -- everyone else gets a shortcut to it. Neither discovery
-    path follows shortcuts. Whether a target even opens depends on the organizer's
-    sharing, not the folder's: on the first real employee folder checked, the account
-    the folder was shared with could open none of them. So these are calls this folder
-    does not process, and the only place that fact can be surfaced is a diagnostic.
+    the recording itself -- everyone else gets a shortcut to it. A shortcut is followed
+    only when its target opens, and whether it does depends on the organizer's sharing,
+    not the folder's: on the first real employee folder checked, the account the folder
+    was shared with could open none of them. ``doctor --drive`` uses this to say how
+    many of a folder's attended calls it processes, and why not the rest.
 
     Returns ``[{id, name, container_id, target_id}]``; nothing is resolved here.
     """
@@ -468,21 +504,82 @@ def list_recording_shortcuts(service: Any, folder_id: str) -> list[dict]:
     return found
 
 
-def is_readable(service: Any, file_id: str) -> bool:
-    """Whether this account can open ``file_id`` at all.
+def get_shortcut_target(service: Any, target_id: str) -> dict | None:
+    """The file a shortcut points at, or ``None`` when this account cannot open it.
 
     Drive answers a file you may not see with 404, exactly as it answers one that
-    does not exist; for a shortcut's target those mean the same thing here.
+    does not exist; for a shortcut's target those mean the same thing here, and so does
+    a target in the bin. Anything else -- an outage, a revoked token -- is raised: folded
+    into ``None`` it would drop a real call from the listing as if by decision.
+
+    The fields are the ones a shortcut lacks: size, readiness and age describe the
+    recording, and ``parents`` says whose folder it lives in.
     """
     try:
-        service.files().get(
-            fileId=file_id, fields="id", supportsAllDrives=True
-        ).execute()
+        target = (
+            service.files()
+            .get(
+                fileId=target_id,
+                fields=(
+                    "id, name, mimeType, size, createdTime, parents, trashed, "
+                    "videoMediaMetadata(durationMillis)"
+                ),
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
     except HttpError as exc:
         if getattr(exc.resp, "status", None) in (403, 404):
-            return False
+            return None
         raise
-    return True
+    if target.get("trashed"):
+        return None
+    return target
+
+
+def _follow_recording_shortcut(
+    service: Any, shortcut: dict, *, transcribed_here: bool
+) -> tuple[dict, dict] | None:
+    """A shortcut to a recording as ``(file, extra item fields)``, or ``None``.
+
+    The file keeps the shortcut's id, name and appProperties: it is the object in this
+    folder, so bookkeeping is written onto it and artifacts are paired with it -- the
+    organizer's own file is theirs, and may not even be writable. Size, readiness and
+    age come from the target, which is also what gets downloaded (``media_id``).
+
+    A shortcut that already has a transcript beside it was followed before. Walking
+    re-lists every folder every cycle, so its target is not asked about again: that
+    would cost a request per attended call for good, for an answer nothing needs.
+    """
+    details = shortcut.get("shortcutDetails") or {}
+    target_id = details.get("targetId")
+    if not target_id:
+        return None
+    file = {
+        "id": shortcut["id"],
+        "name": shortcut.get("name", ""),
+        "mimeType": SHORTCUT_MIME,
+        "createdTime": shortcut.get("createdTime"),
+        "appProperties": shortcut.get("appProperties") or {},
+    }
+    if transcribed_here:
+        # Already done here, so the readiness gate has nothing left to wait on, and
+        # whose folder the target lives in was settled when it was followed.
+        return file, {
+            "media_id": target_id, "target_parents": None, "has_media_metadata": True,
+        }
+
+    target = get_shortcut_target(service, target_id)
+    if target is None:
+        logger.debug(
+            "Shortcut %s points at a recording this account cannot open", shortcut["id"]
+        )
+        return None
+    file["size"] = target.get("size")
+    file["createdTime"] = target.get("createdTime") or file["createdTime"]
+    if target.get("videoMediaMetadata"):
+        file["videoMediaMetadata"] = target["videoMediaMetadata"]
+    return file, {"media_id": target_id, "target_parents": target.get("parents") or []}
 
 
 def list_subfolders(service: Any, folder_id: str) -> list[dict]:
@@ -541,11 +638,20 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
     The OpenAI stage consults this to skip presets that already have an artifact.
     Legacy ``<video-stem>.keypoints.md`` files uploaded before the appProperty
     existed are folded onto the ``keypoints`` preset by stem.
+
+    A shortcut to a recording this account can open is an item too, and only such an
+    item carries ``media_id`` (the file to download) and ``target_parents`` (where
+    the recording lives, ``None`` when it was not looked up). Whether the organizer's
+    folder is configured -- in which case that folder processes the call -- is the
+    caller's decision; this module does not know the configuration.
     """
     found = _list_files_by_mimes(
-        service, folder_id, (MP4_MIME, MP3_MIME, TXT_MIME, MD_MIME)
+        service, folder_id, (MP4_MIME, MP3_MIME, TXT_MIME, MD_MIME, SHORTCUT_MIME)
     )
     mp4_files = [f for f in found if f.get("mimeType") == MP4_MIME]
+    recording_shortcuts = [
+        f for f in found if f.get("mimeType") == SHORTCUT_MIME and names_a_recording(f)
+    ]
     mp3_files = [f for f in found if f.get("mimeType") == MP3_MIME]
     text_files = [f for f in found if f.get("mimeType") == TXT_MIME]
     md_files = [f for f in found if f.get("mimeType") == MD_MIME]
@@ -595,8 +701,20 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
     txt_by_source_id = _files_by_source_video_id(txt_files)
     artifacts_by_source_id = _artifacts_by_source_video_id(md_files)
 
+    recordings: list[tuple[dict, dict]] = [(mp4, {}) for mp4 in mp4_files]
+    for shortcut in recording_shortcuts:
+        transcribed_here = (
+            txt_by_source_id.get(shortcut["id"])
+            or txt_by_stem.get(drive_stem(shortcut.get("name", "")))
+        ) is not None
+        followed = _follow_recording_shortcut(
+            service, shortcut, transcribed_here=transcribed_here
+        )
+        if followed is not None:
+            recordings.append(followed)
+
     items: list[dict] = []
-    for mp4 in mp4_files:
+    for mp4, extra in recordings:
         stem = drive_stem(mp4["name"])
         mp3 = mp3_by_source_id.get(mp4["id"]) or mp3_by_stem.get(stem)
         txt = txt_by_source_id.get(mp4["id"]) or txt_by_stem.get(stem)
@@ -645,6 +763,7 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
             "telegram_sent_chat_id": mp4_props.get(
                 TELEGRAM_SENT_CHAT_ID_PROPERTY, ""
             ),
+            **extra,
         })
     return items
 

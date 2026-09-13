@@ -1465,6 +1465,23 @@ def test_planfix_sent_lists_only_recordings_with_a_marker(tmp_path, monkeypatch,
     assert "never-sent.mp4" not in out
 
 
+def test_planfix_sent_links_the_recording_of_a_call_followed_through_a_shortcut(
+    tmp_path, monkeypatch, capsys
+):
+    files = [{
+        "id": "sc1",
+        "name": "attended.mp4",
+        "mimeType": "application/vnd.google-apps.shortcut",
+        "createdTime": "2026-08-01T10:00:00.000Z",
+        "appProperties": {"planfix_comment_task_id": "900001"},
+        "shortcutDetails": {"targetId": "clients-video", "targetMimeType": "video/mp4"},
+    }]
+    _run_sent(tmp_path, monkeypatch, files)
+
+    out = capsys.readouterr().out
+    assert "/file/d/clients-video/view" in out
+
+
 def test_planfix_sent_puts_the_newest_first(tmp_path, monkeypatch, capsys):
     """The question this answers is 'what happened lately'."""
     _run_sent(tmp_path, monkeypatch, _sent_files(3))
@@ -1509,7 +1526,7 @@ def test_planfix_sent_reports_an_empty_log(tmp_path, monkeypatch, capsys):
 
 
 def _doctor_config(mocker, tmp_path, **overrides):
-    cfg = make_config(folders=["folderA"], data_dir=tmp_path, **overrides)
+    cfg = make_config(**{"folders": ["folderA"], "data_dir": tmp_path, **overrides})
     mocker.patch("src.cli.load_config", return_value=cfg)
     return cfg
 
@@ -1619,6 +1636,54 @@ def test_list_walks_subfolders_and_says_where_each_file_lives(mocker, capsys, tm
     assert "meeting-1" in out
 
 
+def test_list_marks_a_call_followed_through_a_shortcut(mocker, capsys, tmp_path):
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.cli.drive.list_folder_tree_state",
+        return_value=[{
+            "file": {"id": "sc1", "name": "attended.mp4"},
+            "container_id": "meeting-1",
+            "media_id": "clients-video",
+            "target_parents": ["clients-meeting"],
+            "has_mp3": False,
+            "has_txt": False,
+        }],
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value=None)
+
+    cli.main(["list"])
+
+    out = capsys.readouterr().out.splitlines()
+    line = next(text for text in out if "attended.mp4" in text)
+    assert "via shortcut" in line
+
+
+def test_list_leaves_out_a_shortcut_the_organizers_folder_processes(
+    mocker, capsys, tmp_path
+):
+    """`list` must not contradict what a cycle does, and a cycle leaves that call to
+    the organizer's folder."""
+    _doctor_config(mocker, tmp_path, folders=["folderA", "organizer"])
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.cli.drive.list_folder_tree_state",
+        side_effect=lambda service, folder_id: [{
+            "file": {"id": "sc1", "name": "internal.mp4"},
+            "container_id": "meeting-1",
+            "media_id": "v-org",
+            "target_parents": ["org-meeting"],
+            "has_mp3": False,
+            "has_txt": False,
+        }] if folder_id == "folderA" else [],
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="organizer")
+
+    cli.main(["list"])
+
+    assert "internal.mp4" not in capsys.readouterr().out
+
+
 def test_latest_looks_inside_subfolders(mocker, tmp_path):
     _doctor_config(mocker, tmp_path)
     mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
@@ -1680,6 +1745,38 @@ def test_changes_shows_our_videos_with_the_folder_they_belong_to(
     assert "call.mp4" in out
     assert "meeting-1" in out
     assert "folderA" in out
+
+
+def test_changes_shows_an_attended_call_that_arrived_as_a_shortcut(
+    mocker, capsys, tmp_path
+):
+    """The cycle takes it; a report that said "nothing of ours" would contradict it."""
+    cfg = _doctor_config(mocker, tmp_path)
+    _save_cursor(cfg, "tok-1")
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.cli.drive.list_changes",
+        return_value=(
+            [{
+                "fileId": "sc1",
+                "file": {
+                    "id": "sc1", "name": "attended.mp4",
+                    "mimeType": "application/vnd.google-apps.shortcut",
+                    "shortcutDetails": {"targetMimeType": "video/mp4"},
+                    "parents": ["meeting-1"], "trashed": False,
+                },
+            }],
+            "tok-2",
+        ),
+    )
+    mocker.patch("src.cli.drive.find_configured_ancestor", return_value="folderA")
+
+    cli.main(["changes"])
+
+    line = next(
+        text for text in capsys.readouterr().out.splitlines() if "attended.mp4" in text
+    )
+    assert "shortcut" in line
 
 
 def test_changes_raw_shows_entries_that_are_not_ours(mocker, capsys, tmp_path):
@@ -1896,32 +1993,48 @@ def test_list_marks_recordings_a_cutoff_leaves_out(mocker, capsys, tmp_path):
     assert "before since" not in new_line
 
 
-def test_doctor_says_how_many_attended_calls_this_folder_cannot_process(
-    mocker, capsys, tmp_path
-):
-    """Found on a real employee folder: two calls they attended existed only as
-    shortcuts to recordings the account could not open. Every other line of the
-    diagnosis read as healthy, so without this those calls were missing without a
-    trace."""
-    _doctor_config(mocker, tmp_path)
+def test_doctor_says_what_becomes_of_each_attended_call(mocker, capsys, tmp_path):
+    """Found on a real employee folder: calls they attended existed only as shortcuts,
+    and every other line of the diagnosis read as healthy. Each shortcut ends one of
+    three ways, and only one of them needs an operator."""
+    from googleapiclient.errors import HttpError
+
+    _doctor_config(mocker, tmp_path, folders=["folderA", "organizer"])
     mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
     mocker.patch("src.cli.drive.describe_folder", return_value=_folder_meta())
     mocker.patch("src.cli.drive.list_folder_tree_state", return_value=[])
     mocker.patch("src.cli.drive.list_subfolders", return_value=[])
     mocker.patch(
         "src.cli.drive.list_recording_shortcuts",
-        return_value=[
+        side_effect=lambda service, folder_id: [
             {"id": "s1", "name": "a.mp4", "container_id": "m1", "target_id": "t1"},
             {"id": "s2", "name": "b.mp4", "container_id": "m2", "target_id": "t2"},
-        ],
+            {"id": "s3", "name": "c.mp4", "container_id": "m3", "target_id": "t3"},
+        ] if folder_id == "folderA" else [],
     )
-    mocker.patch("src.cli.drive.is_readable", side_effect=[False, True])
+    mocker.patch(
+        "src.cli.drive.get_shortcut_target",
+        side_effect=lambda service, target_id: {
+            "t1": None,
+            "t2": {"id": "t2", "parents": ["org-meeting"]},
+            "t3": {"id": "t3", "parents": ["clients-meeting"]},
+        }[target_id],
+    )
+
+    def resolve(service, container_id, configured_ids, cache=None):
+        if container_id == "clients-meeting":
+            raise HttpError(MagicMock(status=404), b"")
+        return "organizer" if container_id == "org-meeting" else None
+
+    mocker.patch("src.main.drive.find_configured_ancestor", side_effect=resolve)
 
     cli.main(["doctor", "--drive"])
 
     out = capsys.readouterr().out
-    assert "2 shortcut(s) to recordings, not processed from this folder" in out
-    assert "1 not readable by this account" in out
+    assert (
+        "3 shortcut(s) to recordings: 1 processed from this folder, "
+        "1 left to the organizer's configured folder, 1 not readable by this account"
+    ) in out
 
 
 def test_doctor_stays_quiet_about_shortcuts_when_there_are_none(

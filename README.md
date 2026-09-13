@@ -332,32 +332,46 @@ which is also how to undo a cutoff set wrong. `--dry-run` names each recording a
 cutoff excludes; a real cycle only counts them, because a folder with a year of
 history would otherwise print itself every ten minutes.
 
-### What neither path sees: shortcuts
+### Attended calls: shortcuts
 
-A Drive *shortcut* to a recording is invisible to both discovery paths. Drive reports
-the shortcut's own `application/vnd.google-apps.shortcut` and puts the real type in
-`shortcutDetails.targetMimeType`, so a `video/mp4` filter drops it in a folder listing
-and in the changes feed alike.
+Meet gives the organizer the recording and every other participant a shortcut to it,
+so an employee's folder holds a shortcut for each call they only attended. It is not
+rare: the first real employee folder checked had eleven meetings, eight with the
+recording itself and three holding nothing but shortcuts. A shortcut stays a shortcut
+whoever looks at it -- Drive reports its own `application/vnd.google-apps.shortcut`
+and keeps the real type in `shortcutDetails.targetMimeType` -- and both discovery
+paths accept that pair as a recording.
 
-This is deliberate rather than unnoticed, and it is not rare. Meet gives the
-organizer the real file and every other participant a shortcut to it, so an
-employee's folder holds a shortcut for each call they only attended. The first real
-employee folder checked had eleven meetings: eight with the recording itself, three
-holding nothing but shortcuts.
+What happens to one is decided every cycle:
 
-A shortcut stays a shortcut whoever looks at it; access only decides whether its
-target opens. The shortcut is readable because its folder was shared, but the target
-keeps the organizer's sharing, not the folder's -- the account that employee folder
-was shared with could open none of the five. That is a fact about that account, not
-about every account.
+| the recording it points at | what happens |
+| --- | --- |
+| does not open for this account | nothing -- there is nothing to download; `doctor --drive` counts these |
+| opens, and lives under a configured folder | left to that folder, the organizer's, so the call is processed once |
+| opens, and lives anywhere else | processed from the shortcut: the recording is downloaded, artifacts and markers go beside the shortcut |
 
-Those calls are processed from the organizer's folder, if that folder is configured.
-`gdstt doctor --drive` says how many a folder does not process and how many of their
-targets this account cannot open:
+The recording keeps the organizer's sharing, not the folder's: sharing an employee's
+folder shares the shortcut, not what it points at. The account the first employee
+folder was shared with could open none of its five targets; an account the organizer
+shared their recordings with can. Meet's transcript beside the call is a shortcut too,
+and speaker names are read from its target the same way. `gdstt doctor --drive` says
+which way each shortcut went:
 
 ```
-  2 shortcut(s) to recordings, not processed from this folder (2 not readable by this account): calls organized by someone else -- configure the organizer's folder to capture them
+  3 shortcut(s) to recordings: 1 processed from this folder, 1 left to the organizer's configured folder, 1 not readable by this account -- share those recordings with this account, or configure the organizer's folder
 ```
+
+Three consequences worth knowing:
+
+- **Cost.** Until a shortcut has a transcript beside it, each listing asks Drive for
+  its target, plus once per organizer meeting folder to decide whose call it is.
+  After that it costs nothing extra.
+- **Access granted later.** A recording shared after the fact changes nothing in the
+  attendee's folder, so the feed never names it. Run `gdstt run-once --mode walk`
+  once after granting access.
+- **Order.** A call already processed through a shortcut stays processed if the
+  organizer's folder is configured afterwards, and that folder then processes it a
+  second time.
 
 **The cursor waits for the work.** It only moves after a cycle that processed
 everything it found. A recording that failed, a folder that could not be listed, or a

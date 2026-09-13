@@ -470,7 +470,9 @@ def _write_call_documents(
     task_id = booking_decision.task_id or str(item.get("planfix_comment_task_id") or "")
     document = meta_doc.build(
         values=values,
-        file_id=file_id,
+        # The link should open the recording. For a call followed through a shortcut
+        # that is the organizer's file, not the shortcut this item is keyed by.
+        file_id=item.get("media_id") or file_id,
         file_name=file_name,
         folder_id=folder_id,
         config=config,
@@ -1197,6 +1199,10 @@ def process_item(
     # longer the configured folder. Falling back to ``folder_id`` keeps a caller that
     # built an item by hand working, and is exactly right for a flat folder.
     container_id = item.get("container_id") or folder_id
+    # What to download. The same file for a recording in this folder; for a call
+    # followed through a shortcut, the organizer's recording the shortcut points at,
+    # while ``file_id`` -- the shortcut -- keeps pairing artifacts and bookkeeping.
+    media_id = item.get("media_id") or file_id
 
     stt_enabled = bool(config.stt_provider)
     preset_only_reprocess = reprocess_presets is not None and not reprocess_txt
@@ -1254,7 +1260,7 @@ def process_item(
                 mp4_path = _call_with_transient_retries(
                     lambda: drive.download(
                         service,
-                        file_id,
+                        media_id,
                         tmp_dir,
                         file_name,
                         expected_size_bytes=file_size,
@@ -1283,7 +1289,7 @@ def process_item(
                     mp4_path = _call_with_transient_retries(
                         lambda: drive.download(
                             service,
-                            file_id,
+                            media_id,
                             tmp_dir,
                             file_name,
                             expected_size_bytes=file_size,
@@ -1740,11 +1746,18 @@ def process_target(
     )
     mime = meta.get("mimeType", "")
     treat_as_folder = is_folder if is_folder is not None else mime == drive.FOLDER_MIME
+    configured_ids = {folder.folder_id for folder in config.folders}
+    ancestors: dict[str, str | None] = {}
 
     if treat_as_folder:
         telemetry: list[_ProcessTelemetry] = []
         items = _call_with_transient_retries(
-            lambda: drive.list_folder_tree_state(service, target_id),
+            lambda: _without_calls_the_organizer_covers(
+                service,
+                drive.list_folder_tree_state(service, target_id),
+                configured_ids,
+                ancestors,
+            ),
             description=f"list folder state for {target_id}",
         )
         configured_id = _configured_folder_for(service, target_id, config)
@@ -1787,15 +1800,23 @@ def process_target(
         raise RuntimeError(f"File {target_id} has no parent folder")
     container_id = parents[0]
     folder_id = _configured_folder_for(service, container_id, config)
-    items = _call_with_transient_retries(
+    listed = _call_with_transient_retries(
         lambda: drive.list_folder_state(service, container_id),
         description=f"list folder state for {container_id}",
+    )
+    items = _without_calls_the_organizer_covers(
+        service, listed, configured_ids, ancestors
     )
     _apply_local_output_state(items, config)
     match = next(
         (it for it in items if it["file"]["id"] == target_id), None
     )
     if match is None:
+        if any(it["file"]["id"] == target_id for it in listed):
+            raise RuntimeError(
+                f"File {target_id} is a shortcut to a recording in a configured folder; "
+                "that folder processes the call"
+            )
         raise RuntimeError(
             f"File {target_id} is not an MP4 in folder {container_id}"
         )
@@ -1841,6 +1862,68 @@ def _notify_listing_failure(what: str, exc: Exception, config: Config) -> None:
     )
 
 
+def _is_in_a_configured_folder(
+    service: Any,
+    parents: list[str] | None,
+    configured_ids: set[str] | frozenset[str],
+    cache: dict[str, str | None],
+) -> bool:
+    """Whether a followed shortcut's recording lives under a configured folder.
+
+    No parents -- not looked up because the call was already done here, or a recording
+    shared on its own without its folder -- is "no". So is a 403/404 on the way up:
+    every configured folder is readable, and so is everything inside it, so a folder
+    this account cannot open is not one of them. Anything else is raised, because
+    guessing "no" during an outage would process a call its organizer's folder is
+    about to process too.
+    """
+    if not parents:
+        return False
+    try:
+        owner = drive.find_configured_ancestor(
+            service, parents[0], configured_ids, cache=cache
+        )
+    except HttpError as exc:
+        if getattr(exc.resp, "status", None) not in (403, 404):
+            raise
+        cache[parents[0]] = None
+        return False
+    return owner is not None
+
+
+def _without_calls_the_organizer_covers(
+    service: Any,
+    items: list[dict],
+    configured_ids: set[str] | frozenset[str],
+    cache: dict[str, str | None],
+) -> list[dict]:
+    """Drop followed shortcuts whose recording sits in a configured folder.
+
+    Meet gives the organizer the recording and each attendee a shortcut to it. When
+    the organizer's folder is watched too, that folder processes the call; following
+    the shortcut as well would transcribe, summarize and deliver it twice. When it is
+    not -- a client's call, or a colleague nobody configured -- the shortcut is the
+    only way in.
+
+    Decided every cycle from where the recording lives, never remembered. Configuring
+    an organizer later moves each of their calls not yet processed over to their own
+    folder; a call already processed through a shortcut stays processed, and a second
+    pass from the organizer's folder is the known price of that order of events.
+    """
+    kept: list[dict] = []
+    for item in items:
+        if _is_in_a_configured_folder(
+            service, item.get("target_parents"), configured_ids, cache
+        ):
+            logger.debug(
+                "Leaving %s to the organizer's configured folder",
+                item.get("file", {}).get("name"),
+            )
+            continue
+        kept.append(item)
+    return kept
+
+
 def _discover_by_walk(service: Any, config: Config) -> _Discovery:
     """Read every configured folder and its meeting subfolders.
 
@@ -1865,12 +1948,19 @@ def _discover_by_walk(service: Any, config: Config) -> _Discovery:
 
     listings: list[tuple[str, list[dict]]] = []
     folder_errors = 0
+    configured_ids = {folder.folder_id for folder in config.folders}
+    ancestors: dict[str, str | None] = {}
     for folder in config.folders:
         folder_id = folder.folder_id
         listing_retry_state = _RetryState()
         try:
             items = _call_with_transient_retries(
-                lambda: drive.list_folder_tree_state(service, folder_id),
+                lambda: _without_calls_the_organizer_covers(
+                    service,
+                    drive.list_folder_tree_state(service, folder_id),
+                    configured_ids,
+                    ancestors,
+                ),
                 description=f"list folder state for {folder_id}",
                 retry_state=listing_retry_state,
             )
@@ -1926,8 +2016,8 @@ def _discover_by_changes(service: Any, config: Config, cursor: str) -> _Discover
             continue
         # Our own uploads come through here too. Judging by the entry alone is what
         # keeps the feed to a single request: no files.get to find out what something
-        # is.
-        if file_info.get("mimeType") != drive.MP4_MIME:
+        # is. An attended call arrives as a shortcut, so that counts as a recording.
+        if not drive.names_a_recording(file_info):
             continue
         parents = file_info.get("parents") or []
         if not parents:
@@ -1959,7 +2049,12 @@ def _discover_by_changes(service: Any, config: Config, cursor: str) -> _Discover
         listing_retry_state = _RetryState()
         try:
             items = _call_with_transient_retries(
-                lambda: drive.list_folder_state(service, container_id),
+                lambda: _without_calls_the_organizer_covers(
+                    service,
+                    drive.list_folder_state(service, container_id),
+                    configured_ids,
+                    ancestors,
+                ),
                 description=f"list folder state for {container_id}",
                 retry_state=listing_retry_state,
             )

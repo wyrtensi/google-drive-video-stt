@@ -23,6 +23,7 @@ def _make_drive_service(
     changes: list[dict] | None = None,
     start_page_token: str = "tok-start",
     new_start_page_token: str = "tok-next",
+    unreadable: tuple[str, ...] = (),
 ) -> MagicMock:
     """A tiny in-memory Drive: ``files().list`` really filters by parent and mimeType.
 
@@ -80,7 +81,13 @@ def _make_drive_service(
 
     def get_side_effect(**kwargs):
         request = MagicMock()
-        request.execute.return_value = by_id.get(kwargs["fileId"], {})
+        if kwargs["fileId"] in unreadable:
+            # What Drive answers for a file this account may not see.
+            from googleapiclient.errors import HttpError
+
+            request.execute.side_effect = HttpError(MagicMock(status=404), b"")
+        else:
+            request.execute.return_value = by_id.get(kwargs["fileId"], {})
         return request
 
     files_resource.get.side_effect = get_side_effect
@@ -1337,11 +1344,25 @@ def test_mp4_timestamps_in_tree_on_a_flat_folder_is_unchanged():
 # Checked read-only against a real employee's Google Meet folder: eleven meeting
 # subfolders, eight recordings, and five shortcuts -- three meetings the employee only
 # attended held nothing but shortcuts to the organizer's recording and transcript,
-# none of which that account could open.
+# none of which that account could open. Another account may open them, so a
+# shortcut is followed whenever its target opens.
 
 
-def _attended_meeting_service():
-    return _make_drive_service([
+_ORGANIZERS_VIDEO = {
+    "id": "organizers-video",
+    "name": "someone-elses-call (2026-09-04 17:57 GMT+2).mp4",
+    "mimeType": drive.MP4_MIME,
+    "parents": ["organizers-meeting"],
+    "size": "5000",
+    "createdTime": "2026-09-04T15:10:00.000Z",
+    "videoMediaMetadata": {"durationMillis": "60000"},
+    # Someone else's bookkeeping on their own file must never be read as ours.
+    "appProperties": {"telegram_sent_chat_id": "-100organizer"},
+}
+
+
+def _attended_meeting_service(*, target_readable=False, extra=()):
+    files = [
         {"id": "own", "name": "exf-wxzm-uzk - 2026/09/09 17:42 CEST",
          "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
         {"id": "v1", "name": "exf-wxzm-uzk (2026-09-09 17:42 GMT+2).mp4",
@@ -1350,22 +1371,176 @@ def _attended_meeting_service():
          "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
         {"id": "sc-video", "name": "someone-elses-call (2026-09-04 17:57 GMT+2).mp4",
          "mimeType": drive.SHORTCUT_MIME, "parents": ["attended"],
+         "createdTime": "2026-09-04T15:11:00.000Z",
          "shortcutDetails": {"targetId": "organizers-video",
                              "targetMimeType": drive.MP4_MIME}},
         {"id": "sc-doc", "name": "someone-elses-call - Transcript",
          "mimeType": drive.SHORTCUT_MIME, "parents": ["attended"],
          "shortcutDetails": {"targetId": "organizers-doc",
                              "targetMimeType": drive.GOOGLE_DOC_MIME}},
-    ])
+        *extra,
+    ]
+    if target_readable:
+        files.append(_ORGANIZERS_VIDEO)
+    return _make_drive_service(
+        files, unreadable=() if target_readable else ("organizers-video", "organizers-doc")
+    )
 
 
-def test_a_shortcut_to_a_recording_is_not_a_recording():
+def test_a_shortcut_to_a_recording_this_account_cannot_open_is_not_a_recording():
     """Drive reports the shortcut's own mime type; the real one is only in
-    `shortcutDetails`. That is what keeps an attended meeting from being processed
-    twice -- once from each participant's folder."""
+    `shortcutDetails`. A target that does not open cannot be downloaded, so there is
+    nothing to process -- `doctor --drive` is where that gets said."""
     items = drive.list_folder_tree_state(_attended_meeting_service(), "root")
 
     assert [it["file"]["id"] for it in items] == ["v1"]
+
+
+def test_a_shortcut_to_a_recording_that_opens_is_listed_where_the_shortcut_sits():
+    """Meet gives an attendee a shortcut, never a copy, whatever the access. When the
+    recording opens, the call is this folder's to process: from the target's bytes,
+    with artifacts beside the shortcut in the attendee's meeting folder."""
+    items = drive.list_folder_tree_state(
+        _attended_meeting_service(target_readable=True), "root"
+    )
+
+    followed = next(it for it in items if it["file"]["id"] == "sc-video")
+    assert followed["container_id"] == "attended"
+    assert followed["media_id"] == "organizers-video"
+    assert followed["target_parents"] == ["organizers-meeting"]
+    assert followed["file"]["name"] == "someone-elses-call (2026-09-04 17:57 GMT+2).mp4"
+    # Size, readiness and age describe the recording, not the shortcut.
+    assert followed["file"]["size"] == "5000"
+    assert followed["file"]["createdTime"] == "2026-09-04T15:10:00.000Z"
+    assert followed["has_media_metadata"] is True
+
+
+def test_a_followed_shortcut_keeps_its_own_bookkeeping_not_the_organizers():
+    """Markers are written onto the shortcut, which sits in the attendee's folder. The
+    organizer's file carries the organizer's markers, and reading those would skip a
+    Telegram summary this attendee never got."""
+    service = _attended_meeting_service(target_readable=True)
+    items = drive.list_folder_tree_state(service, "root")
+
+    followed = next(it for it in items if it["file"]["id"] == "sc-video")
+    assert followed["telegram_sent_chat_id"] == ""
+    assert followed["file"]["appProperties"] == {}
+
+
+def test_a_real_recording_carries_no_shortcut_fields():
+    items = drive.list_folder_tree_state(
+        _attended_meeting_service(target_readable=True), "root"
+    )
+
+    own = next(it for it in items if it["file"]["id"] == "v1")
+    assert "media_id" not in own
+    assert "target_parents" not in own
+
+
+def test_a_shortcut_already_transcribed_here_is_not_looked_up_again():
+    """Walking re-lists every folder every cycle. A finished call must not cost a
+    request per attended meeting for good, so a transcript beside the shortcut is taken
+    as the answer and the target is not asked about."""
+    transcript = {
+        "id": "t1", "name": "someone-elses-call (2026-09-04 17:57 GMT+2).txt",
+        "mimeType": drive.TXT_MIME, "parents": ["attended"],
+        "appProperties": {"source_video_id": "sc-video"},
+    }
+    service = _attended_meeting_service(extra=(transcript,))
+
+    items = drive.list_folder_state(service, "attended")
+
+    assert [it["file"]["id"] for it in items] == ["sc-video"]
+    assert items[0]["media_id"] == "organizers-video"
+    assert items[0]["has_txt"] is True
+    service.files.return_value.get.assert_not_called()
+
+
+def test_a_shortcut_to_a_trashed_recording_is_not_a_recording():
+    service = _attended_meeting_service(
+        extra=({**_ORGANIZERS_VIDEO, "trashed": True},)
+    )
+    service_files = service.files.return_value
+    by_id = {"organizers-video": {**_ORGANIZERS_VIDEO, "trashed": True}}
+
+    def get(**kwargs):
+        request = MagicMock()
+        request.execute.return_value = by_id.get(kwargs["fileId"], {})
+        return request
+
+    service_files.get.side_effect = get
+
+    items = drive.list_folder_state(service, "attended")
+
+    assert items == []
+
+
+def test_a_drive_outage_resolving_a_target_is_not_mistaken_for_no_access():
+    """A 503 folded into "cannot open" would drop a real call from the listing as if
+    by decision; raised, it counts as a listing failure and holds the cursor."""
+    from googleapiclient.errors import HttpError
+
+    service = _attended_meeting_service()
+    request = MagicMock()
+    request.execute.side_effect = HttpError(MagicMock(status=503), b"")
+    service.files.return_value.get.side_effect = None
+    service.files.return_value.get.return_value = request
+
+    with pytest.raises(HttpError):
+        drive.list_folder_state(service, "attended")
+
+
+def test_shortcuts_come_back_in_the_same_listing_request():
+    service = _attended_meeting_service(target_readable=True)
+
+    drive.list_folder_state(service, "attended")
+
+    assert service.files.return_value.list.call_count == 1
+
+
+def test_names_a_recording_accepts_a_shortcut_to_one():
+    assert drive.names_a_recording({"mimeType": drive.MP4_MIME})
+    assert drive.names_a_recording({
+        "mimeType": drive.SHORTCUT_MIME,
+        "shortcutDetails": {"targetMimeType": drive.MP4_MIME},
+    })
+    assert not drive.names_a_recording({
+        "mimeType": drive.SHORTCUT_MIME,
+        "shortcutDetails": {"targetMimeType": drive.GOOGLE_DOC_MIME},
+    })
+    assert not drive.names_a_recording({"mimeType": drive.MP3_MIME})
+
+
+def test_list_changes_asks_whether_a_shortcut_points_at_a_recording():
+    """Without the target's type on the entry, a new attended call in the feed would
+    look like any other shortcut and be dropped."""
+    service = _make_drive_service([], changes=[])
+
+    drive.list_changes(service, "tok-1")
+
+    fields = service.changes.return_value.list.call_args.kwargs["fields"]
+    assert "shortcutDetails" in fields
+
+
+def test_meet_transcript_is_found_through_a_shortcut_and_read_from_its_target():
+    """An attendee's meeting folder holds a shortcut to the transcript too. A shortcut
+    cannot be exported, so the target's id is what comes back."""
+    service = _attended_meeting_service(target_readable=True)
+
+    doc = drive.find_meet_transcript(service, "attended", "someone-elses-call - Recording")
+
+    assert doc is not None
+    assert doc["id"] == "organizers-doc"
+
+
+def test_mp4_timestamps_include_shortcuts_to_recordings_only():
+    """The reports read markers from here, and a followed call's markers live on its
+    shortcut."""
+    service = _attended_meeting_service()
+
+    ids = [f["id"] for f in drive.list_mp4_timestamps(service, "attended")]
+
+    assert ids == ["sc-video"]
 
 
 def test_a_shortcut_to_a_folder_is_not_a_subfolder():
@@ -1422,7 +1597,7 @@ def test_a_folder_without_shortcuts_reports_none():
     assert drive.list_recording_shortcuts(_meet_root_service(), "root") == []
 
 
-def test_is_readable_says_no_for_a_file_this_account_cannot_open():
+def test_shortcut_target_is_none_for_a_file_this_account_cannot_open():
     """Drive answers "you may not see this" with 404, the same as "no such file"."""
     from googleapiclient.errors import HttpError
 
@@ -1431,17 +1606,17 @@ def test_is_readable_says_no_for_a_file_this_account_cannot_open():
         MagicMock(status=404), b""
     )
 
-    assert drive.is_readable(service, "organizers-video") is False
+    assert drive.get_shortcut_target(service, "organizers-video") is None
 
 
-def test_is_readable_says_yes_when_the_file_opens():
+def test_shortcut_target_comes_back_when_the_file_opens():
     service = MagicMock()
     service.files.return_value.get.return_value.execute.return_value = {"id": "v1"}
 
-    assert drive.is_readable(service, "v1") is True
+    assert drive.get_shortcut_target(service, "v1") == {"id": "v1"}
 
 
-def test_is_readable_does_not_hide_a_drive_outage_as_a_permission_answer():
+def test_shortcut_target_does_not_hide_a_drive_outage_as_a_permission_answer():
     from googleapiclient.errors import HttpError
 
     service = MagicMock()
@@ -1450,4 +1625,4 @@ def test_is_readable_does_not_hide_a_drive_outage_as_a_permission_answer():
     )
 
     with pytest.raises(HttpError):
-        drive.is_readable(service, "v1")
+        drive.get_shortcut_target(service, "v1")

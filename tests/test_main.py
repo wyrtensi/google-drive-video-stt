@@ -5794,3 +5794,276 @@ def test_a_recording_drive_never_processes_is_held_only_within_the_grace(
 
     assert main._is_still_settling(fresh, now) is True
     assert main._is_still_settling(stale, now) is False
+
+
+# --- Attended calls: a shortcut to a recording -------------------------------------
+#
+# Meet gives the organizer the recording and every attendee a shortcut to it, whatever
+# anyone's access. A shortcut whose recording opens is followed -- unless the
+# organizer's folder is configured too, in which case that folder does the call and
+# the shortcut would only do it a second time.
+
+SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
+
+
+def _shortcut_item(file_id, name, container_id, *, media_id, target_parents, **kwargs):
+    item = _subfolder_item(file_id, name, container_id, **kwargs)
+    item["file"]["mimeType"] = SHORTCUT_MIME
+    item["media_id"] = media_id
+    item["target_parents"] = target_parents
+    return item
+
+
+def _organizer_is(configured_id, *, below):
+    """``find_configured_ancestor`` for a Drive where only ``below`` sits under a
+    configured folder."""
+    def resolve(service, container_id, configured_ids, cache=None):
+        return configured_id if container_id == below else None
+    return resolve
+
+
+def test_a_followed_shortcut_downloads_the_recording_but_keeps_artifacts_beside_itself(
+    mocker, tmp_path
+):
+    """The bytes are the organizer's; the artifacts and their pairing belong to the
+    attendee's meeting folder, where the shortcut is -- the organizer's folder may not
+    even be writable."""
+    service = MagicMock()
+    mp4_path = tmp_path / "call.mp4"
+    mp3_path = tmp_path / "call.mp3"
+    download_mock = mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    upload_mock = mocker.patch("src.main.drive.upload", return_value={"id": "u1"})
+    item = _shortcut_item(
+        "sc1", "call.mp4", "attended",
+        media_id="organizers-video", target_parents=["org-meeting"],
+    )
+
+    main.process_item(service, item, "attendee", make_config(bitrate="128k"))
+
+    assert download_mock.call_args.args[1] == "organizers-video"
+    assert upload_mock.call_args.args[2] == "attended"
+    assert upload_mock.call_args.kwargs["app_properties"]["source_video_id"] == "sc1"
+
+
+def test_a_call_whose_organizer_is_configured_is_processed_once_from_that_folder(
+    mocker, tmp_path
+):
+    """Both employees are watched: the organizer holds the recording, the attendee a
+    shortcut to it. Following the shortcut too would pay for the call twice and post
+    its summary twice."""
+    cfg = make_config(folders=["attendee", "organizer"], data_dir=tmp_path)
+    shortcut = _shortcut_item(
+        "sc1", "call.mp4", "attended",
+        media_id="v-org", target_parents=["org-meeting"],
+    )
+    real = _subfolder_item("v-org", "call.mp4", "org-meeting")
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        side_effect=lambda service, folder_id: {
+            "attendee": [shortcut], "organizer": [real],
+        }[folder_id],
+    )
+    mocker.patch(
+        "src.main.drive.find_configured_ancestor",
+        side_effect=_organizer_is("organizer", below="org-meeting"),
+    )
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    processed = [call.args[1]["file"]["id"] for call in process_mock.call_args_list]
+    assert processed == ["v-org"]
+
+
+def test_a_call_organized_outside_the_watched_folders_is_processed_from_the_shortcut(
+    mocker, tmp_path
+):
+    """A client's call, or a colleague nobody configured: the shortcut is the only way
+    in, and the call belongs to the attendee whose folder it is in."""
+    cfg = make_config(folders=["attendee"], data_dir=tmp_path)
+    shortcut = _shortcut_item(
+        "sc1", "call.mp4", "attended",
+        media_id="clients-video", target_parents=["clients-meeting"],
+    )
+    mocker.patch("src.main.drive.list_folder_tree_state", return_value=[shortcut])
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value=None)
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    process_mock.assert_called_once()
+    assert process_mock.call_args.args[1] is shortcut
+    assert process_mock.call_args.args[2] == "attendee"
+
+
+def test_a_recording_folder_this_account_cannot_climb_is_not_a_configured_one(
+    mocker, tmp_path
+):
+    """Every configured folder is readable, and so is everything inside it. A 404 on
+    the way up therefore means "not ours", and failing toward processing keeps the call
+    from vanishing."""
+    cfg = make_config(folders=["attendee"], data_dir=tmp_path)
+    shortcut = _shortcut_item(
+        "sc1", "call.mp4", "attended",
+        media_id="clients-video", target_parents=["clients-meeting"],
+    )
+    mocker.patch("src.main.drive.list_folder_tree_state", return_value=[shortcut])
+    mocker.patch(
+        "src.main.drive.find_configured_ancestor", side_effect=_http_error(404)
+    )
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    process_mock.assert_called_once()
+
+
+def test_not_knowing_whose_call_it_is_counts_as_a_listing_failure(mocker, tmp_path):
+    """An outage must not read as "the organizer is not configured" -- that would
+    process a call its organizer's folder is about to process too."""
+    cfg = make_config(folders=["attendee"], data_dir=tmp_path)
+    shortcut = _shortcut_item(
+        "sc1", "call.mp4", "attended",
+        media_id="v-org", target_parents=["org-meeting"],
+    )
+    mocker.patch("src.main.drive.list_folder_tree_state", return_value=[shortcut])
+    mocker.patch(
+        "src.main.drive.find_configured_ancestor",
+        side_effect=RuntimeError("drive is down"),
+    )
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    process_mock.assert_not_called()
+    notify_mock.assert_called_once()
+
+
+def test_the_feed_names_the_meeting_folder_of_a_new_shortcut_to_a_recording(
+    mocker, tmp_path
+):
+    """An attended call reaches the attendee's folder as a shortcut, never as an mp4;
+    a feed that only let `video/mp4` through would never look at it."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path)
+    _save_cursor(cfg, "tok-1")
+    entry = _change("sc1", "meeting-1", mime=SHORTCUT_MIME)
+    entry["file"]["shortcutDetails"] = {"targetMimeType": "video/mp4"}
+    mocker.patch("src.main.drive.list_changes", return_value=([entry], "tok-2"))
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    listing = mocker.patch("src.main.drive.list_folder_state", return_value=[])
+
+    main.run_once(MagicMock(), cfg)
+
+    listing.assert_called_once_with(mocker.ANY, "meeting-1")
+
+
+def test_the_feed_ignores_a_shortcut_to_anything_but_a_recording(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path)
+    _save_cursor(cfg, "tok-1")
+    entry = _change("sc-doc", "meeting-1", mime=SHORTCUT_MIME)
+    entry["file"]["shortcutDetails"] = {
+        "targetMimeType": "application/vnd.google-apps.document"
+    }
+    mocker.patch("src.main.drive.list_changes", return_value=([entry], "tok-2"))
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    listing = mocker.patch("src.main.drive.list_folder_state", return_value=[])
+
+    main.run_once(MagicMock(), cfg)
+
+    listing.assert_not_called()
+
+
+def test_an_attended_recording_drive_is_still_processing_holds_the_cursor(
+    mocker, tmp_path
+):
+    """The recording finishes in the organizer's Drive, so the feed never reports that
+    under this folder. Holding the cursor is what brings the shortcut's change back
+    next cycle; stepping past it would lose the call for good."""
+    cfg = _one_change_cycle(mocker, tmp_path)
+    shortcut = _shortcut_item(
+        "sc1", "call.mp4", "meeting-1", media_id="v-org", target_parents=[],
+    )
+    shortcut["has_media_metadata"] = False
+    shortcut["file"]["createdTime"] = (
+        datetime.now(timezone.utc) - timedelta(minutes=5)
+    ).isoformat()
+    mocker.patch("src.main.drive.list_folder_state", return_value=[shortcut])
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    process_mock.assert_not_called()
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-1"
+
+
+def test_processing_a_shortcut_by_id_follows_it(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path)
+    mocker.patch(
+        "src.main.drive.get_file_metadata",
+        return_value={"id": "sc1", "mimeType": SHORTCUT_MIME, "parents": ["attended"]},
+    )
+    mocker.patch(
+        "src.main.drive.find_configured_ancestor",
+        side_effect=_organizer_is("root", below="attended"),
+    )
+    shortcut = _shortcut_item(
+        "sc1", "call.mp4", "attended",
+        media_id="clients-video", target_parents=["clients-meeting"],
+    )
+    mocker.patch("src.main.drive.list_folder_state", return_value=[shortcut])
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.process_target(MagicMock(), "sc1", cfg)
+
+    process_mock.assert_called_once()
+    assert process_mock.call_args.args[2] == "root"
+
+
+def test_processing_a_shortcut_the_organizers_folder_covers_says_so(mocker, tmp_path):
+    """Being told "not an MP4" would send an operator looking for a broken file."""
+    cfg = make_config(folders=["attendee", "organizer"], data_dir=tmp_path)
+    mocker.patch(
+        "src.main.drive.get_file_metadata",
+        return_value={"id": "sc1", "mimeType": SHORTCUT_MIME, "parents": ["attended"]},
+    )
+
+    def resolve(service, container_id, configured_ids, cache=None):
+        return {"attended": "attendee", "org-meeting": "organizer"}.get(container_id)
+
+    mocker.patch("src.main.drive.find_configured_ancestor", side_effect=resolve)
+    shortcut = _shortcut_item(
+        "sc1", "call.mp4", "attended",
+        media_id="v-org", target_parents=["org-meeting"],
+    )
+    mocker.patch("src.main.drive.list_folder_state", return_value=[shortcut])
+    process_mock = mocker.patch("src.main.process_item")
+
+    with pytest.raises(RuntimeError, match="configured folder"):
+        main.process_target(MagicMock(), "sc1", cfg)
+
+    process_mock.assert_not_called()
+
+
+def test_the_call_document_links_the_recording_rather_than_the_shortcut(
+    mocker, tmp_path
+):
+    build_mock = mocker.patch("src.main.meta_doc.build", return_value={})
+    mocker.patch("src.main.meta_doc.to_yaml", return_value="")
+    mocker.patch("src.main.stt_document.assemble", return_value="")
+    mocker.patch("src.main.output.write_artifact")
+    item = _shortcut_item(
+        "sc1", "call.mp4", "attended",
+        media_id="organizers-video", target_parents=["org-meeting"],
+    )
+
+    main._write_call_documents(
+        MagicMock(), "sc1", "call.mp4", "attendee", "attended", "text", {},
+        make_config(), tmp_path, item=item, booking_decision=MATCHED_DECISION,
+    )
+
+    assert build_mock.call_args.kwargs["file_id"] == "organizers-video"

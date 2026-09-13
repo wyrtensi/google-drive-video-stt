@@ -170,19 +170,30 @@ good. Match the parameter, never 400 alone, or a genuinely broken request gets s
 over quietly. In changes mode, listings are merged per configured folder; each item
 keeps its own `container_id`, so nothing about placement is lost.
 
-Neither path sees a **shortcut** to a recording: Drive reports the shortcut's own
-`application/vnd.google-apps.shortcut`, with the real type only in
-`shortcutDetails.targetMimeType`, so the `video/mp4` filter drops it in the listing and
-in the feed alike (verified live). Organizers get real files, which is whose folders
-are configured; a participant who only gets a shortcut is out of scope, and processing
-one would duplicate work the organizer's folder already did. A shortcut is a shortcut
-whatever the viewer's access: its own ACL comes from its folder, its target's from the
-organizer. On the first real employee folder checked, all five targets returned 404 to
-the account the folder was shared with -- a fact about that account, not a law; one the
-organizer shared recordings with can open them. `list_recording_shortcuts` +
-`is_readable` exist so `doctor --drive` can say how many calls a folder does not process
-and how many targets this account cannot open -- the rest of its diagnosis reads as
-healthy without that line.
+Both paths accept a **shortcut** to a recording (`drive.names_a_recording`): Drive
+reports the shortcut's own `application/vnd.google-apps.shortcut`, with the real type
+only in `shortcutDetails.targetMimeType` (verified live, in the listing and in the
+feed). Meet gives attendees shortcuts whatever their access, and the target keeps the
+organizer's ACL. `list_folder_state` follows one only when `files.get` on the target
+succeeds (403/404/trashed drop it), and the item then carries `media_id` -- what
+`process_item` downloads -- and `target_parents`. `file` stays the shortcut, so
+`source_video_id`, the bookkeeping appProperties and done-detection all key on the
+shortcut's id; never write onto the organizer's file (verified live: appProperties
+land on a shortcut with its `modifiedTime` kept). A shortcut with a transcript beside
+it skips the target lookup (`target_parents=None`), or every walk would pay a request
+per attended call for good.
+
+`main._without_calls_the_organizer_covers` then drops items whose target lives under a
+configured folder: that folder is the organizer's and processes the call, and
+following the shortcut too would pay for it and post it twice. Every call site that
+lists applies it -- walk, feed, `process_target`, `list`, `doctor` -- and they must stay
+in step, or `list` contradicts a cycle again. A 403/404 while climbing means "not
+configured" (every configured folder is readable, and so is what is inside it); any
+other error raises and counts as a folder error, because guessing "not configured"
+during an outage processes the call twice. Known prices, both documented: an organizer
+configured after a call went through the shortcut processes it a second time, and a
+target that becomes readable later is only found by a walk -- nothing changes in the
+attendee's folder for the feed to report.
 
 It is also held back entirely unless the cycle drained what it found. The feed names a
 folder once, when something happens in it, and a recording that failed writes no

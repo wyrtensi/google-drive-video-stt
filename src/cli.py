@@ -409,13 +409,14 @@ def _describe_employee(folder) -> str:
     return folder.name or folder.email or "(no employee configured)"
 
 
-def _print_folder_diagnosis(service, folder_id: str) -> None:
+def _print_folder_diagnosis(service, folder_id: str, configured_ids: set[str]) -> None:
     """One line per configured folder, saying enough to spot a folder gone quiet.
 
     Reachability alone is what made this service look healthy while it was finding
     nothing, so this reports what the folder *is* and when it last received anything,
     not only that it answered.
     """
+    ancestors: dict[str, str | None] = {}
     try:
         meta = drive.describe_folder(service, folder_id)
     except Exception as exc:  # noqa: BLE001 -- a diagnostic must report, not raise
@@ -426,7 +427,12 @@ def _print_folder_diagnosis(service, folder_id: str) -> None:
     parents = ", ".join(meta.get("parents") or []) or "none"
     trashed = " TRASHED" if meta.get("trashed") else ""
     try:
-        items = drive.list_folder_tree_state(service, folder_id)
+        items = main_module._without_calls_the_organizer_covers(
+            service,
+            drive.list_folder_tree_state(service, folder_id),
+            configured_ids,
+            ancestors,
+        )
         subfolders = drive.list_subfolders(service, folder_id)
     except Exception as exc:  # noqa: BLE001
         print(f"Folder {folder_id}: {name!r}{trashed}, parent {parents}, listing failed ({exc})")
@@ -441,25 +447,42 @@ def _print_folder_diagnosis(service, folder_id: str) -> None:
         f"newest {newest or 'never'}"
     )
 
-    # The calls this folder does not process, said out loud. Without it a manager's
-    # folder reports every recording it holds as handled while the meetings they
-    # only attended -- a shortcut each -- go missing without a trace.
+    # What becomes of each call this person only attended, said out loud. Without it
+    # a folder reports every recording it holds as handled while the meetings they
+    # only attended -- a shortcut each -- could go missing without a trace.
     try:
         shortcuts = drive.list_recording_shortcuts(service, folder_id)
+        followed = organizers = unreadable = 0
+        for shortcut in shortcuts:
+            target = (
+                drive.get_shortcut_target(service, shortcut["target_id"])
+                if shortcut["target_id"] else None
+            )
+            if target is None:
+                unreadable += 1
+            elif main_module._is_in_a_configured_folder(
+                service, target.get("parents"), configured_ids, ancestors
+            ):
+                organizers += 1
+            else:
+                followed += 1
     except Exception as exc:  # noqa: BLE001
-        print(f"  shortcuts to recordings: could not list ({exc})")
+        print(f"  shortcuts to recordings: could not check ({exc})")
         return
     if not shortcuts:
         return
-    unreadable = sum(
-        1 for shortcut in shortcuts
-        if not shortcut["target_id"] or not drive.is_readable(service, shortcut["target_id"])
+    line = (
+        f"  {len(shortcuts)} shortcut(s) to recordings: {followed} processed from this "
+        f"folder, {organizers} left to the organizer's configured folder, {unreadable} "
+        "not readable by this account"
     )
-    print(
-        f"  {len(shortcuts)} shortcut(s) to recordings, not processed from this folder "
-        f"({unreadable} not readable by this account): calls organized by someone "
-        "else -- configure the organizer's folder to capture them"
-    )
+    if unreadable:
+        # The only outcome an operator can act on: those calls reach no folder at all.
+        line += (
+            " -- share those recordings with this account, or configure the "
+            "organizer's folder"
+        )
+    print(line)
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
@@ -524,8 +547,9 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print(f"changes cursor: {cursor_path} ({state})")
     print(f"discovery: run.discovery={config.run_discovery}")
     print(f"since: run.since={config.run_since or 'unset, every recording in scope'}")
+    configured_ids = {folder.folder_id for folder in config.folders}
     for folder in config.folders:
-        _print_folder_diagnosis(service, folder.folder_id)
+        _print_folder_diagnosis(service, folder.folder_id, configured_ids)
 
 
 def cmd_config_init(args: argparse.Namespace) -> None:
@@ -645,7 +669,10 @@ def cmd_planfix_sent(args: argparse.Namespace) -> None:
                         task_id,
                         folder.name,
                         item.get("name", ""),
-                        item.get("id", ""),
+                        # A call followed through a shortcut keeps its marker on the
+                        # shortcut; the link should still open the recording.
+                        (item.get("shortcutDetails") or {}).get("targetId")
+                        or item.get("id", ""),
                     )
                 )
 
@@ -773,7 +800,7 @@ def cmd_changes(args: argparse.Namespace) -> None:
             file_info = entry.get("file") or {}
             if entry.get("removed") or file_info.get("trashed"):
                 continue
-            if file_info.get("mimeType") != drive.MP4_MIME:
+            if not drive.names_a_recording(file_info):
                 continue
             parents = file_info.get("parents") or []
             if not parents:
@@ -784,7 +811,8 @@ def cmd_changes(args: argparse.Namespace) -> None:
             if owner is None:
                 continue
             shown += 1
-            print(f"  {file_info.get('name')}  in {parents[0]}  (folder {owner})")
+            via = ", shortcut" if file_info.get("mimeType") == drive.SHORTCUT_MIME else ""
+            print(f"  {file_info.get('name')}  in {parents[0]}  (folder {owner}{via})")
         if not shown:
             print("  nothing of ours; pass --raw to see every entry")
 
@@ -849,8 +877,15 @@ def cmd_list(args: argparse.Namespace) -> None:
         logger.error("No folders to inspect; configure folders or pass --folder")
         raise SystemExit(1)
     service = auth.build_drive_service(config=config)
+    configured_ids = {folder.folder_id for folder in config.folders}
+    ancestors: dict[str, str | None] = {}
     for folder_id in folder_ids:
-        items = drive.list_folder_tree_state(service, folder_id)
+        items = main_module._without_calls_the_organizer_covers(
+            service,
+            drive.list_folder_tree_state(service, folder_id),
+            configured_ids,
+            ancestors,
+        )
         # Without this the report and the service disagree: `list` would show eight
         # recordings with no transcript while every cycle skipped all eight, and the
         # operator would be left wondering which one was lying.
@@ -867,7 +902,8 @@ def cmd_list(args: argparse.Namespace) -> None:
             # operator can no longer assume which folder that was.
             where = item.get("container_id") or folder_id
             scope = "  before since, not processed" if out_of_scope else ""
-            print(f"  [{mp3}] [{txt}] {name}  ({where}){scope}")
+            via = "  via shortcut" if item.get("media_id") else ""
+            print(f"  [{mp3}] [{txt}] {name}  ({where}){via}{scope}")
 
 
 def _add_processing_safety_args(parser: argparse.ArgumentParser) -> None:
