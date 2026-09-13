@@ -2039,6 +2039,74 @@ def test_doctor_says_what_becomes_of_each_attended_call(mocker, capsys, tmp_path
     ) in out
 
 
+def _doctor_with_shortcuts(mocker, tmp_path, shortcuts, targets):
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.cli.drive.describe_folder", return_value=_folder_meta())
+    mocker.patch("src.cli.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.cli.drive.list_subfolders", return_value=[])
+    mocker.patch("src.cli.drive.list_recording_shortcuts", return_value=shortcuts)
+    target_mock = mocker.patch(
+        "src.cli.drive.get_shortcut_target",
+        side_effect=lambda service, target_id: targets[target_id],
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value=None)
+    return target_mock
+
+
+def test_doctor_counts_a_shortcut_without_a_target_as_unreadable(
+    mocker, capsys, tmp_path
+):
+    target_mock = _doctor_with_shortcuts(
+        mocker, tmp_path,
+        [{"id": "s1", "name": "a.mp4", "container_id": "m1", "target_id": None}],
+        {},
+    )
+
+    cli.main(["doctor", "--drive"])
+
+    assert "1 not readable by this account" in capsys.readouterr().out
+    target_mock.assert_not_called()
+
+
+def test_doctor_only_asks_for_action_when_a_call_reaches_no_folder(
+    mocker, capsys, tmp_path
+):
+    _doctor_with_shortcuts(
+        mocker, tmp_path,
+        [{"id": "s1", "name": "a.mp4", "container_id": "m1", "target_id": "t1"}],
+        {"t1": {"id": "t1", "parents": ["clients-meeting"]}},
+    )
+
+    cli.main(["doctor", "--drive"])
+
+    out = capsys.readouterr().out
+    assert "1 processed from this folder" in out
+    assert "share those recordings" not in out
+
+
+def test_doctor_reports_a_shortcut_check_it_could_not_finish(mocker, capsys, tmp_path):
+    """A diagnostic reports; it does not crash on the one line that failed."""
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.cli.drive.describe_folder", return_value=_folder_meta())
+    mocker.patch("src.cli.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.cli.drive.list_subfolders", return_value=[])
+    mocker.patch(
+        "src.cli.drive.list_recording_shortcuts",
+        return_value=[{"id": "s1", "name": "a.mp4", "container_id": "m1", "target_id": "t1"}],
+    )
+    mocker.patch(
+        "src.cli.drive.get_shortcut_target", side_effect=RuntimeError("drive is down")
+    )
+
+    cli.main(["doctor", "--drive"])
+
+    assert "shortcuts to recordings: could not check (drive is down)" in (
+        capsys.readouterr().out
+    )
+
+
 def test_doctor_stays_quiet_about_shortcuts_when_there_are_none(
     mocker, capsys, tmp_path
 ):

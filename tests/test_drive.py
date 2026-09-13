@@ -1361,7 +1361,7 @@ _ORGANIZERS_VIDEO = {
 }
 
 
-def _attended_meeting_service(*, target_readable=False, extra=()):
+def _attended_meeting_service(*, target_readable=False, target=None, extra=()):
     files = [
         {"id": "own", "name": "exf-wxzm-uzk - 2026/09/09 17:42 CEST",
          "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
@@ -1380,10 +1380,11 @@ def _attended_meeting_service(*, target_readable=False, extra=()):
                              "targetMimeType": drive.GOOGLE_DOC_MIME}},
         *extra,
     ]
-    if target_readable:
-        files.append(_ORGANIZERS_VIDEO)
+    readable = target_readable or target is not None
+    if readable:
+        files.append(target if target is not None else _ORGANIZERS_VIDEO)
     return _make_drive_service(
-        files, unreadable=() if target_readable else ("organizers-video", "organizers-doc")
+        files, unreadable=() if readable else ("organizers-video", "organizers-doc")
     )
 
 
@@ -1597,6 +1598,127 @@ def test_a_shortcut_to_a_transcript_is_not_reported_as_a_recording():
 
 def test_a_folder_without_shortcuts_reports_none():
     assert drive.list_recording_shortcuts(_meet_root_service(), "root") == []
+
+
+def _followed(service):
+    return next(
+        it for it in drive.list_folder_state(service, "attended")
+        if it["file"]["id"] == "sc-video"
+    )
+
+
+def test_a_shortcut_drive_refuses_with_403_is_not_a_recording():
+    """Some Workspace policies answer 403 rather than 404 for a file you may not see."""
+    from googleapiclient.errors import HttpError
+
+    service = _attended_meeting_service()
+    request = MagicMock()
+    request.execute.side_effect = HttpError(MagicMock(status=403), b"")
+    service.files.return_value.get.side_effect = None
+    service.files.return_value.get.return_value = request
+
+    assert drive.list_folder_state(service, "attended") == []
+
+
+def test_a_shortcut_without_a_target_is_not_a_recording():
+    """A shortcut whose target was deleted outright can lose its targetId."""
+    broken = {
+        "id": "sc-broken", "name": "gone.mp4", "mimeType": drive.SHORTCUT_MIME,
+        "parents": ["attended"], "shortcutDetails": {"targetMimeType": drive.MP4_MIME},
+    }
+    service = _attended_meeting_service(extra=(broken,))
+
+    ids = [it["file"]["id"] for it in drive.list_folder_state(service, "attended")]
+
+    assert "sc-broken" not in ids
+
+
+def test_a_shortcut_transcribed_before_source_ids_existed_is_recognised_by_name():
+    legacy_txt = {
+        "id": "t1", "name": "someone-elses-call (2026-09-04 17:57 GMT+2).txt",
+        "mimeType": drive.TXT_MIME, "parents": ["attended"],
+    }
+    service = _attended_meeting_service(extra=(legacy_txt,))
+
+    items = drive.list_folder_state(service, "attended")
+
+    assert [it["file"]["id"] for it in items] == ["sc-video"]
+    service.files.return_value.get.assert_not_called()
+
+
+def test_a_followed_shortcut_waits_while_drive_is_still_processing_the_recording():
+    """Readiness is the recording's: the attendee's shortcut appears as soon as Meet
+    files the call, often before Drive has finished with the video."""
+    fresh = {k: v for k, v in _ORGANIZERS_VIDEO.items() if k != "videoMediaMetadata"}
+
+    followed = _followed(_attended_meeting_service(target=fresh))
+
+    assert followed["has_media_metadata"] is False
+    assert followed["file"]["createdTime"] == _ORGANIZERS_VIDEO["createdTime"]
+
+
+def test_a_recording_shared_without_its_folder_has_no_parents_to_climb():
+    loose = {k: v for k, v in _ORGANIZERS_VIDEO.items() if k != "parents"}
+
+    assert _followed(_attended_meeting_service(target=loose))["target_parents"] == []
+
+
+def test_a_followed_shortcut_without_a_readable_age_keeps_its_own():
+    undated = {k: v for k, v in _ORGANIZERS_VIDEO.items() if k != "createdTime"}
+
+    followed = _followed(_attended_meeting_service(target=undated))
+
+    assert followed["file"]["createdTime"] == "2026-09-04T15:11:00.000Z"
+
+
+def test_a_followed_shortcuts_artifacts_are_paired_by_the_shortcut_id():
+    """Artifacts are uploaded carrying the shortcut's id; pairing them by the target's
+    would leave the call pending for good and re-run it every cycle."""
+    mp3 = {
+        "id": "m1", "name": "renamed.mp3", "mimeType": drive.MP3_MIME,
+        "parents": ["attended"], "appProperties": {"source_video_id": "sc-video"},
+    }
+    keypoints = {
+        "id": "k1", "name": "renamed.keypoints.md", "mimeType": drive.MD_MIME,
+        "parents": ["attended"],
+        "appProperties": {"source_video_id": "sc-video", "artifact_type": "keypoints"},
+    }
+    service = _attended_meeting_service(target_readable=True, extra=(mp3, keypoints))
+
+    followed = _followed(service)
+
+    assert followed["has_mp3"] is True
+    assert followed["artifact_ids"] == {"keypoints": "k1"}
+
+
+def test_a_shortcut_named_like_the_transcript_but_not_to_a_document_is_ignored():
+    odd = {
+        "id": "sc-odd", "name": "odd-call (2026-09-04 17:57 GMT+2) - Transcript",
+        "mimeType": drive.SHORTCUT_MIME, "parents": ["attended"],
+        "shortcutDetails": {"targetId": "a-pdf", "targetMimeType": "application/pdf"},
+    }
+    service = _attended_meeting_service(extra=(odd,))
+
+    assert drive.find_meet_transcript(
+        service, "attended", "odd-call (2026-09-04 17:57 GMT+2).mp4"
+    ) is None
+
+
+def test_a_transcript_shortcut_without_a_target_is_ignored():
+    broken = {
+        "id": "sc-broken-doc", "name": "odd-call (2026-09-04 17:57 GMT+2) - Transcript",
+        "mimeType": drive.SHORTCUT_MIME, "parents": ["attended"],
+        "shortcutDetails": {"targetMimeType": drive.GOOGLE_DOC_MIME},
+    }
+    service = _attended_meeting_service(extra=(broken,))
+
+    assert drive.find_meet_transcript(
+        service, "attended", "odd-call (2026-09-04 17:57 GMT+2).mp4"
+    ) is None
+
+
+def test_names_a_recording_says_no_to_a_shortcut_without_details():
+    assert not drive.names_a_recording({"mimeType": drive.SHORTCUT_MIME})
 
 
 def test_shortcut_target_is_none_for_a_file_this_account_cannot_open():
