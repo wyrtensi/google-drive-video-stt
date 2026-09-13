@@ -187,7 +187,12 @@ per attended call for good.
 configured folder: that folder is the organizer's and processes the call, and
 following the shortcut too would pay for it and post it twice. Every call site that
 lists applies it -- walk, feed, `process_target`, `list`, `doctor` -- and they must stay
-in step, or `list` contradicts a cycle again. A 403/404 while climbing means "not
+in step, or `list` contradicts a cycle again. `gdstt latest` is the deliberate exception:
+`find_newest_mp4_in_tree` picks real recordings only, because an unreadable shortcut as
+the newest file would make it fail. Every user-facing id stays the shortcut's (Drive's
+own `webViewLink` for a shortcut is `/file/d/<shortcut id>/view`); putting the target's
+id into the meta document would send `gdstt reprocess <video_id>` to the organizer's
+folder, with no employee and likely no write access. A 403/404 while climbing means "not
 configured" (every configured folder is readable, and so is what is inside it); any
 other error raises and counts as a folder error, because guessing "not configured"
 during an outage processes the call twice. Known prices, both documented: an organizer

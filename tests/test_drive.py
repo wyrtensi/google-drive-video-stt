@@ -1374,7 +1374,7 @@ def _attended_meeting_service(*, target_readable=False, extra=()):
          "createdTime": "2026-09-04T15:11:00.000Z",
          "shortcutDetails": {"targetId": "organizers-video",
                              "targetMimeType": drive.MP4_MIME}},
-        {"id": "sc-doc", "name": "someone-elses-call - Transcript",
+        {"id": "sc-doc", "name": "someone-elses-call (2026-09-04 17:57 GMT+2) - Transcript",
          "mimeType": drive.SHORTCUT_MIME, "parents": ["attended"],
          "shortcutDetails": {"targetId": "organizers-doc",
                              "targetMimeType": drive.GOOGLE_DOC_MIME}},
@@ -1527,7 +1527,9 @@ def test_meet_transcript_is_found_through_a_shortcut_and_read_from_its_target():
     cannot be exported, so the target's id is what comes back."""
     service = _attended_meeting_service(target_readable=True)
 
-    doc = drive.find_meet_transcript(service, "attended", "someone-elses-call - Recording")
+    doc = drive.find_meet_transcript(
+        service, "attended", "someone-elses-call (2026-09-04 17:57 GMT+2).mp4"
+    )
 
     assert doc is not None
     assert doc["id"] == "organizers-doc"

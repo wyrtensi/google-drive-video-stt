@@ -1465,9 +1465,10 @@ def test_planfix_sent_lists_only_recordings_with_a_marker(tmp_path, monkeypatch,
     assert "never-sent.mp4" not in out
 
 
-def test_planfix_sent_links_the_recording_of_a_call_followed_through_a_shortcut(
+def test_planfix_sent_includes_a_call_followed_through_a_shortcut(
     tmp_path, monkeypatch, capsys
 ):
+    """Its marker lives on the shortcut, so that is what the report must read."""
     files = [{
         "id": "sc1",
         "name": "attended.mp4",
@@ -1479,7 +1480,8 @@ def test_planfix_sent_links_the_recording_of_a_call_followed_through_a_shortcut(
     _run_sent(tmp_path, monkeypatch, files)
 
     out = capsys.readouterr().out
-    assert "/file/d/clients-video/view" in out
+    assert "attended.mp4" in out
+    assert "/file/d/sc1/view" in out
 
 
 def test_planfix_sent_puts_the_newest_first(tmp_path, monkeypatch, capsys):

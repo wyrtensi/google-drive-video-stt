@@ -6049,9 +6049,13 @@ def test_processing_a_shortcut_the_organizers_folder_covers_says_so(mocker, tmp_
     process_mock.assert_not_called()
 
 
-def test_the_call_document_links_the_recording_rather_than_the_shortcut(
+def test_the_call_document_names_the_shortcut_like_every_other_id_of_the_call(
     mocker, tmp_path
 ):
+    """One id per call wherever an operator can copy it from: the meta document, the
+    logs, `gdstt reprocess`. Drive's own view link for a shortcut is
+    `/file/d/<shortcut id>/view`, and the organizer's id would send `reprocess` to a
+    folder with no employee and, likely, no write access."""
     build_mock = mocker.patch("src.main.meta_doc.build", return_value={})
     mocker.patch("src.main.meta_doc.to_yaml", return_value="")
     mocker.patch("src.main.stt_document.assemble", return_value="")
@@ -6066,4 +6070,4 @@ def test_the_call_document_links_the_recording_rather_than_the_shortcut(
         make_config(), tmp_path, item=item, booking_decision=MATCHED_DECISION,
     )
 
-    assert build_mock.call_args.kwargs["file_id"] == "organizers-video"
+    assert build_mock.call_args.kwargs["file_id"] == "sc1"

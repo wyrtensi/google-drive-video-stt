@@ -470,9 +470,7 @@ def _write_call_documents(
     task_id = booking_decision.task_id or str(item.get("planfix_comment_task_id") or "")
     document = meta_doc.build(
         values=values,
-        # The link should open the recording. For a call followed through a shortcut
-        # that is the organizer's file, not the shortcut this item is keyed by.
-        file_id=item.get("media_id") or file_id,
+        file_id=file_id,
         file_name=file_name,
         folder_id=folder_id,
         config=config,

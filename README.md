@@ -365,13 +365,21 @@ Three consequences worth knowing:
 
 - **Cost.** Until a shortcut has a transcript beside it, each listing asks Drive for
   its target, plus once per organizer meeting folder to decide whose call it is.
-  After that it costs nothing extra.
+  After that it costs nothing extra. A shortcut whose recording never opens never
+  gets a transcript, so it keeps costing one request per listing -- small, and
+  `doctor --drive` names how many there are.
 - **Access granted later.** A recording shared after the fact changes nothing in the
   attendee's folder, so the feed never names it. Run `gdstt run-once --mode walk`
   once after granting access.
 - **Order.** A call already processed through a shortcut stays processed if the
   organizer's folder is configured afterwards, and that folder then processes it a
   second time.
+
+Every id of such a call -- in the logs, the meta document, `planfix sent`, `gdstt
+reprocess` -- is the shortcut's; Drive's own view link for a shortcut opens the
+recording. `gdstt latest` still picks the newest real recording in the folder: a
+shortcut whose recording does not open would otherwise make it fail. Process a
+shortcut by id instead.
 
 **The cursor waits for the work.** It only moves after a cycle that processed
 everything it found. A recording that failed, a folder that could not be listed, or a

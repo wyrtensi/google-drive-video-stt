@@ -669,10 +669,7 @@ def cmd_planfix_sent(args: argparse.Namespace) -> None:
                         task_id,
                         folder.name,
                         item.get("name", ""),
-                        # A call followed through a shortcut keeps its marker on the
-                        # shortcut; the link should still open the recording.
-                        (item.get("shortcutDetails") or {}).get("targetId")
-                        or item.get("id", ""),
+                        item.get("id", ""),
                     )
                 )
 
